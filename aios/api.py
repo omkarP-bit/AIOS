@@ -48,7 +48,7 @@ from aios.runtime import security_engine
 from aios.security import Decision, SecurityEngine
 
 API_TITLE = "AIOS Control API"
-API_VERSION = "0.4.0"
+API_VERSION = "0.6.0"
 
 
 def get_gateway(request: Request) -> OSGateway:
@@ -65,6 +65,7 @@ def get_gateway(request: Request) -> OSGateway:
             sys_root=settings.sys_root,
             max_read_bytes=settings.max_read_bytes,
             max_dir_entries=settings.max_dir_entries,
+            quarantine_dir=settings.quarantine_dir,
         )
         request.app.state.gateway = gateway
     return gateway
@@ -415,6 +416,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"unknown origin {payload.origin!r}; expected one of "
                 + ", ".join(o.value for o in DataOrigin),
             ) from None
+        if origin not in (DataOrigin.AI, DataOrigin.USER):
+            # The agent path may only carry origins that map to the untrusted
+            # AI trust domain. Kernel, gateway, and policy origins belong to
+            # in-process components, never to an HTTP caller.
+            raise HTTPException(
+                status_code=400,
+                detail=f"origin {origin.value!r} is not accepted on the agent path",
+            )
         try:
             request = ActionRequest(
                 action_id=payload.action_id,
@@ -445,7 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             capability=verdict.capability.matched_capability if verdict.capability else None,
             source=verdict.observation.source if verdict.observation else None,
             duration_ms=round(verdict.duration_ms, 3) if verdict.duration_ms else None,
-            executed=verdict.observation is not None,
+            executed=verdict.executed,
             data=(
                 verdict.observation.data.model_dump()
                 if verdict.observation and hasattr(verdict.observation.data, "model_dump")

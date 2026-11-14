@@ -49,6 +49,11 @@ ACTION_RISK: dict[str, RiskClass] = {
     # read returns attacker-controlled bytes into the AI's context. Highest
     # risk of the read-only set by design, not by accident.
     "filesystem.read": RiskClass.MEDIUM,
+    # Scan is read-only but enumerates a tree, so it is scoped to a path.
+    "filesystem.cleanup_scan": RiskClass.LOW,
+    # Mutation. HIGH means a human-approved plan is mandatory.
+    "filesystem.quarantine": RiskClass.HIGH,
+    "filesystem.restore": RiskClass.HIGH,
 }
 
 #: Decision required before execution, by risk.
@@ -88,6 +93,9 @@ ACTION_SCOPE_DIMENSION: dict[str, ScopeDimension] = {
     "filesystem.list": ScopeDimension.PATH,
     "filesystem.stat": ScopeDimension.PATH,
     "filesystem.read": ScopeDimension.PATH,
+    "filesystem.cleanup_scan": ScopeDimension.PATH,
+    "filesystem.quarantine": ScopeDimension.PATH,
+    "filesystem.restore": ScopeDimension.PATH,
 }
 
 #: Actions whose params carry a 'path' key, used for defence in depth.

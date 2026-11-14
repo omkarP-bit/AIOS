@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aios"
-version = "0.4.0"
-description = "AIOS — local-first AI operating system control plane with capability security"
+version = "0.6.0"
+description = "AIOS — local-first AI operating system control plane with capability security and reversible actions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -36,7 +36,7 @@ aios = "aios.cli.main:run"
 include = ["aios*"]
 
 [tool.setuptools.package-data]
-aios = ["policies/*.rego", "policies/*.json"]
+aios = ["policies/*.rego", "policies/*.json", "telemetry/*.bt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,51 @@
+{
+  "aios": {
+    "version": "0.6.0",
+    "catalog_version": "2026-11-13",
+    "allowed_agents": ["local-agent"],
+    "allowed_actions": {
+      "system.cpu": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V4"]},
+      "system.memory": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
+      "system.hostname": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
+      "system.status": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
+      "system.uptime": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
+      "process.list": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-LLM01:2025"]},
+      "process.inspect": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-LLM01:2025"]},
+      "network.connections": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
+      "filesystem.list": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
+      "filesystem.stat": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
+      "filesystem.read": {"risk": "MEDIUM", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "confirm", "owasp": ["OWASP-LLM01:2025", "OWASP-LLM02:2025", "OWASP-ASVS4-V12"]},
+      "filesystem.cleanup_scan": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V12"]},
+      "filesystem.quarantine": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "STAGE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12"]},
+      "filesystem.restore": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "REVERSIBLE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12"]}
+    },
+    "forbidden_actions": [
+      "process.terminate",
+      "process.kill",
+      "process.signal",
+      "filesystem.write",
+      "filesystem.delete",
+      "filesystem.rm",
+      "filesystem.mkdir",
+      "filesystem.chmod",
+      "filesystem.chown",
+      "filesystem.move",
+      "filesystem.purge",
+      "network.block",
+      "network.open",
+      "network.listen",
+      "firewall.modify",
+      "package.install",
+      "package.remove",
+      "service.start",
+      "service.stop",
+      "kernel.modify",
+      "sysctl.write",
+      "system.shutdown",
+      "system.reboot",
+      "shell.exec",
+      "command.run",
+      "exec"
+    ]
+  }
+}

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.actions.catalog import EXECUTOR_ACTIONS
 from aios.gateway import ActionNotPermitted, OSGateway, PreconditionFailed
 from aios.models import FORBIDDEN_ACTION_NAMES, PARAMS_MAP, DataOrigin, TrustDomain, make_request
 from aios.observers.paths import PathEscapeError
@@ -17,7 +18,7 @@ def gateway(proc_root: Path, sys_root: Path) -> OSGateway:
 
 
 def test_gateway_whitelist_matches_protocol(gateway: OSGateway) -> None:
-    assert gateway.supported_actions == frozenset(PARAMS_MAP)
+    assert gateway.supported_actions == frozenset(PARAMS_MAP) - EXECUTOR_ACTIONS
 
 
 def test_no_mutating_action_is_implementable(gateway: OSGateway) -> None:
@@ -174,6 +175,6 @@ def test_handler_coverage_is_complete() -> None:
         "system.cpu", "system.memory", "system.hostname", "system.status",
         "system.uptime", "process.list", "process.inspect",
         "network.connections", "filesystem.list", "filesystem.stat",
-        "filesystem.read",
+        "filesystem.read", "filesystem.cleanup_scan",
     }
-    assert covered == set(PARAMS_MAP)
+    assert covered == set(PARAMS_MAP) - EXECUTOR_ACTIONS

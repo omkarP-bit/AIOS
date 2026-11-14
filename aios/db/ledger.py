@@ -36,7 +36,7 @@ from aios.db.models import (
 )
 from aios.models import ActionState
 from aios.models.common import utcnow
-from aios.security.capabilities import Capability
+from aios.security.capabilities import Capability, risk_for
 from aios.security.engine import LedgerRecord
 
 log = logging.getLogger("aios.ledger")
@@ -216,7 +216,7 @@ class PostgresLedger:
                     params=request.params,
                     requested_scope=request.requested_scope,
                     origin=request.trust_domain.value,
-                    risk="LOW",
+                    risk=risk_for(request.action_name).value,
                     state=ActionState.PROPOSED.value,
                     decision="ALLOW",
                 )
@@ -338,6 +338,37 @@ class PostgresLedger:
                 raise LedgerError(str(exc)) from exc
 
     # ------------------------------------------------------------ capability sync
+
+    def load_capabilities(self, agent_id: str) -> list[Capability]:
+        """Return live grants for an agent.
+
+        Revoked and expired rows are dropped here rather than by the caller so
+        every consumer gets the same answer.
+        """
+        now = utcnow()
+        rows = self._session.execute(
+            select(Capability_).where(Capability_.agent_id == agent_id)
+        ).scalars()
+        grants: list[Capability] = []
+        for row in rows:
+            if row.revoked_at is not None:
+                continue
+            if row.expires_at is not None:
+                expires = row.expires_at
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=now.tzinfo)
+                if expires <= now:
+                    continue
+            grants.append(
+                Capability(
+                    action=row.action,
+                    scope=tuple(row.scope or ()),
+                    expires_at=row.expires_at,
+                    granted_by=row.granted_by,
+                    reason=row.reason,
+                )
+            )
+        return grants
 
     def sync_capability(
         self,

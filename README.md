@@ -1,7 +1,8 @@
 # AIOS
 
 A local-first control plane that lets an AI agent observe a Linux machine
-without being able to act as a user on it.
+without being able to act as a user on it. The only mutation path is a
+reversible, operator-approved quarantine that never runs unapproved.
 
 The premise: an agent that can call a shell is a compromised agent waiting to
 happen, because a prompt injection in any content it reads becomes arbitrary
@@ -11,16 +12,31 @@ The engine, not the model, is the trust boundary.
 
 ## Status
 
-Days 1–3 of the build are complete. The system is **read-only by
-construction** — there is no code path in it that can modify the machine.
+The read-only control plane is complete through milestone M5, with M6
+delivered as an optional scaffold. The first mutation path — cleanup scan →
+plan → approval → quarantine → restore — is implemented, and it is
+reversible. Observation is still read-only by construction: the gateway table
+contains only observers.
 
-| Day | Component | State |
-|-----|-----------|-------|
-| 1 | Read-only observers, observation envelope, lifecycle state machine | done |
-| 2 | Action protocol, OS gateway, CLI, HTTP API | done |
-| 3 | Capability manager, security engine, audit ledger (PostgreSQL) | done |
-| 4 | OPA/Rego policy | not started |
-| 5 | AI model integration (Ollama) | not started |
+| Milestone | Component | State |
+|-----------|-----------|-------|
+| M1 | Read-only observers, observation envelope, lifecycle state machine | done |
+| M2 | Action protocol, OS gateway, CLI, HTTP API | done |
+| M3 | AI runtime (Groq opt-in, optional Ollama) | done |
+| M4 | OPA/Rego policy, audit persistence, capability loading | done |
+| M5 | Prompt-injection defence suite | done |
+| M6 | eBPF observation (code + docs) | scaffold — see [docs/EBPF.md](docs/EBPF.md) |
+| M7 | Reversible cleanup: scan → plan → approve → quarantine → restore | done |
+
+## Design documents
+
+The read-only build is complete, and the first action in the mutation
+framework is implemented:
+
+- [docs/ACTIONS.md](docs/ACTIONS.md) — effect classes, plan/approval lifecycle,
+  executor contract, quarantine/restore reference action
+- [docs/OWASP.md](docs/OWASP.md) — OWASP tag scheme, control mapping, and gaps
+- [docs/EBPF.md](docs/EBPF.md) — optional observation scaffold
 
 ## Install
 
@@ -75,6 +91,93 @@ process.list  network.connections
 Deliberately **not** granted: `process.inspect`, and every `filesystem`
 action. `filesystem.read` is MEDIUM risk, so it needs a human confirmation
 that this build cannot yet provide — it is refused, not silently allowed.
+
+## Reversible cleanup
+
+`filesystem.quarantine` is the first non-read-only action. It is deliberately
+narrow: one regular file per step, a plan bound by hash, an operator approval,
+and an inverse (`filesystem.restore`). Hard delete is not implemented, and
+`filesystem.purge` is permanently forbidden.
+
+```bash
+aios cleanup scan ~/Downloads --min-age-days 30 --plan-out plan.json
+# inspect plan.json, then approve the exact hash it printed
+aios cleanup quarantine plan.json --confirm-plan-hash sha256:...
+aios cleanup restore plan.json --confirm-plan-hash sha256:...
+```
+
+Four properties keep it reversible and non-delegable:
+
+- The scanner chooses candidates. The model may rank or explain them; it
+  cannot add a path or change a threshold.
+- Approval is an HMAC token over the plan hash, short-lived and single-use.
+  Only the CLI mints it, and it is never persisted.
+- The executor re-checks `(dev, ino, size, mtime, mode, uid)` immediately
+  before `renameat2(RENAME_NOREPLACE)`. A file edited after approval is
+  refused, not moved.
+- Quarantine must be on the same filesystem, so the move is atomic and the
+  bytes never transit through the AI. Every move writes a sidecar record that
+  restore validates.
+
+Set `AIOS_APPROVAL_SECRET` for approvals that survive a restart, and keep
+`AIOS_QUARANTINE_DIR` on the same filesystem as the targets. The design and
+its limits are in [docs/ACTIONS.md](docs/ACTIONS.md).
+
+## Policy is Rego
+
+Authorization rules are not implemented in Python. They live in
+`aios/policies/authz.rego`, with the action allowlist, risk table, and
+forbidden names in `aios/policies/data.json`.
+
+```bash
+opa test aios/policies          # policy unit tests
+opa eval -d aios/policies ...   # inspect a decision
+```
+
+The engine only builds a normalized input document, evaluates the policy, and
+enforces the answer. `ALLOW`, `CONFIRM`, and `DENY` are all produced by the
+same rules. If OPA cannot run, the answer is `DENY` with
+`policy_unavailable` — there is no second, Python implementation to drift
+from the Rego.
+
+## The AI runtime
+
+The model is an untrusted text generator. It proposes; it never authorizes.
+Its output is parsed into the same closed Action Protocol a hand-written
+proposal uses, then capability-checked, policy-checked, and audited.
+
+```bash
+aios provider                       # show the configured provider (never the key)
+aios ask "how is the cpu?"          # propose and authorize, do not execute
+aios ask "list 5 processes" --execute
+```
+
+A `--execute` flag is required to run an authorized proposal, so a model
+answer alone can never cause an action.
+
+### Groq is opt-in
+
+Groq is supported because the development laptop cannot hold a local model.
+External inference is **disabled by default**. Both settings are required:
+
+```bash
+AIOS_ALLOW_EXTERNAL_MODEL=true
+AIOS_GROQ_API_KEY=...
+AIOS_MODEL_PROVIDER=groq
+```
+
+Only a compact aggregate snapshot leaves the machine: hostname, kernel,
+CPU/memory totals, process names, and network counts. **Raw file contents are
+never sent.** The provider, model, and a SHA-256 hash of the prompt are
+recorded; the prompt itself is not. Model output stays T3 and still passes
+through OPA and the capability check.
+
+A local provider remains available for deployments that can run one:
+
+```bash
+AIOS_MODEL_PROVIDER=ollama
+AIOS_OLLAMA_MODEL=qwen2.5:3b-instruct-q4_K_M
+```
 
 ## The two surfaces
 
@@ -201,11 +304,16 @@ and what is explicitly out of scope.
 ## Tests
 
 ```bash
-python3 -m pytest tests/ -q      # 314 tests
+python3 -m pytest tests/ -q      # 396 tests
 python3 -m ruff check aios/ tests/
+opa test aios/policies
 ```
 
 The PostgreSQL tests skip rather than fail when no database is reachable.
+
+`tests/test_injection.py` is the attack corpus. Every entry must either fail
+to parse as a proposal or be denied by the engine with a security event, so
+the measured detection rate is asserted rather than described.
 
 `tests/test_live.py` is the one file that reads the real `/proc` instead of a
 fixture tree. It compares the observers against `nproc`, `uname`, `ps`, and

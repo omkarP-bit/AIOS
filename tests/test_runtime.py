@@ -210,3 +210,83 @@ def test_ai_origin_is_never_trusted() -> None:
     )
     assert request.trust_domain.value == "T3"
     assert request.trust_domain is not DataOrigin.AI
+
+
+# ---------------------------------------------------------------- policy wiring
+
+
+def test_runtime_selects_opa_when_configured(settings) -> None:
+    from aios.config import Settings
+    from aios.runtime import _policy_for
+    from aios.security import OpaPolicyEngine, RegoPolicyEngine
+
+    assert isinstance(_policy_for(settings), RegoPolicyEngine)
+    configured = Settings(
+        proc_root=Path("/proc"),
+        sys_root=Path("/sys"),
+        database_url="sqlite://",
+        opa_url="http://127.0.0.1:8181",
+    )
+    policy = _policy_for(configured)
+    assert isinstance(policy, OpaPolicyEngine)
+    assert policy.url == "http://127.0.0.1:8181"
+
+
+def test_runtime_restores_persisted_capabilities() -> None:
+    from aios.runtime import _load_grants
+    from aios.security import Capability, CapabilityManager
+
+    class FakeLedger:
+        def __init__(self) -> None:
+            self.synced = []
+
+        def load_capabilities(self, agent_id: str):
+            return [Capability(action="system.cpu")]
+
+        def sync_capability(self, agent_id, capability, *, principal="x"):
+            self.synced.append(capability)
+
+    ledger = FakeLedger()
+    manager = CapabilityManager(default_grants=[])
+    _load_grants(ledger, manager)
+    assert manager.has("local-agent", "system.cpu")
+    assert ledger.synced == []
+
+
+def test_runtime_seeds_defaults_on_first_run() -> None:
+    from aios.runtime import _load_grants
+    from aios.security import DEFAULT_CAPABILITIES, CapabilityManager
+
+    class FakeLedger:
+        def __init__(self) -> None:
+            self.synced = []
+
+        def load_capabilities(self, agent_id: str):
+            return []
+
+        def sync_capability(self, agent_id, capability, *, principal="x"):
+            self.synced.append(capability)
+
+    ledger = FakeLedger()
+    manager = CapabilityManager(default_grants=[])
+    _load_grants(ledger, manager)
+    assert len(ledger.synced) == len(DEFAULT_CAPABILITIES)
+
+
+def test_runtime_opa_is_fail_closed_when_unreachable(proc_root: Path, sys_root: Path) -> None:
+    from aios.config import Settings
+    from aios.security import Decision, DenialReason, make_ai_request
+
+    settings = Settings(
+        database_url="sqlite://",
+        proc_root=proc_root,
+        sys_root=sys_root,
+        opa_url="http://127.0.0.1:1",
+        opa_timeout_s=0.2,
+    )
+    gateway = OSGateway(proc_root=proc_root, sys_root=sys_root)
+    with security_engine(settings, gateway) as engine:
+        verdict = engine.process(make_ai_request("process.list"))
+    assert verdict.decision is Decision.DENY
+    assert verdict.denial_reason is DenialReason.POLICY_UNAVAILABLE
+    assert verdict.observation is None

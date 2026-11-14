@@ -1,0 +1,41 @@
+#!/usr/bin/env bpftrace
+/*
+ * AIOS observation probe. Read-only: it attaches to tracepoints and prints
+ * one JSON object per line. It does not block, modify, or signal anything.
+ *
+ * Run only on a host you own:
+ *   sudo bpftrace scripts/ebpf/aios_trace.bt
+ *
+ * Feed the output to aios.telemetry.ebpf.parse_events. Raw events are T0/T2
+ * observation data; they are never treated as instructions.
+ */
+
+BEGIN
+{
+  printf("{\"kind\":\"probe_start\",\"pid\":%d,\"comm\":\"bpftrace\",\"detail\":\"aios_trace\",\"timestamp_ns\":%llu}\n", pid, nsecs);
+}
+
+tracepoint:syscalls:sys_enter_execve
+{
+  printf("{\"kind\":\"execve\",\"pid\":%d,\"comm\":\"%s\",\"detail\":\"%s\",\"timestamp_ns\":%llu}\n", pid, comm, str(args->filename), nsecs);
+}
+
+tracepoint:syscalls:sys_enter_connect
+{
+  printf("{\"kind\":\"connect\",\"pid\":%d,\"comm\":\"%s\",\"detail\":\"fd=%d\",\"timestamp_ns\":%llu}\n", pid, comm, args->fd, nsecs);
+}
+
+tracepoint:sched:sched_process_exit
+{
+  printf("{\"kind\":\"exit\",\"pid\":%d,\"comm\":\"%s\",\"detail\":\"exit\",\"timestamp_ns\":%llu}\n", pid, comm, nsecs);
+}
+
+interval:s:30
+{
+  printf("{\"kind\":\"probe_heartbeat\",\"pid\":%d,\"comm\":\"bpftrace\",\"detail\":\"alive\",\"timestamp_ns\":%llu}\n", pid, nsecs);
+}
+
+END
+{
+  printf("{\"kind\":\"probe_stop\",\"pid\":%d,\"comm\":\"bpftrace\",\"detail\":\"aios_trace\",\"timestamp_ns\":%llu}\n", pid, nsecs);
+}

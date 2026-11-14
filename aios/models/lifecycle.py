@@ -33,7 +33,9 @@ TRANSITIONS: dict[ActionState, frozenset[ActionState]] = {
     ActionState.AUTHORIZED: frozenset(
         {ActionState.EXECUTED, ActionState.DENIED, ActionState.FAILED}
     ),
-    ActionState.EXECUTED: frozenset({ActionState.OBSERVED, ActionState.FAILED}),
+    ActionState.EXECUTED: frozenset(
+        {ActionState.OBSERVED, ActionState.COMPLETED, ActionState.FAILED}
+    ),
     ActionState.OBSERVED: frozenset({ActionState.COMPLETED, ActionState.VIOLATION}),
     ActionState.COMPLETED: frozenset(),
     ActionState.DENIED: frozenset(),

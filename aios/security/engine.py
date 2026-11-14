@@ -12,9 +12,8 @@ Concretely, an action reaches the OS Gateway only by passing, in order:
      carrying ``pid=4312`` is rejected rather than resolved in the AI's favour.
   3. **Risk classification** — from a fixed table, never from model output.
   4. **Capability check** — exact-action grant, scope-checked, deny by default.
-  5. **Policy decision** — local policy in v0.3, OPA from v0.4. Absent OPA the
-     engine runs in local mode and *still* fails closed for anything above
-     the configured ceiling.
+  5. **Policy decision** — Rego via OPA. The rules live in
+     ``aios/policies/authz.rego``; if OPA cannot run, the decision is DENY.
 
 The engine is the only caller of ``OSGateway.execute`` outside the read-only
 CLI observation path, and it always logs before and after.
@@ -22,16 +21,22 @@ CLI observation path, and it always logs before and after.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from aios.actions.executor import ExecutorError, QuarantineExecutor
+from aios.actions.plans import ApprovalGrant, Plan
 from aios.gateway import ActionNotPermitted, GatewayError, OSGateway, PreconditionFailed
 from aios.models import (
     FORBIDDEN_ACTION_NAMES,
@@ -41,7 +46,7 @@ from aios.models import (
     DataOrigin,
     assert_transition,
 )
-from aios.models.common import Observation, TrustDomain, utcnow
+from aios.models.common import TRUSTED_DOMAINS, Observation, TrustDomain, utcnow
 from aios.security.capabilities import (
     PATH_PARAM_ACTIONS,
     RiskClass,
@@ -51,6 +56,7 @@ from aios.security.capabilities import (
     scope_dimension_for,
 )
 from aios.security.manager import CapabilityCheck, CapabilityManager
+from aios.security.policy_input import build_policy_input
 
 
 class Decision(str, Enum):
@@ -78,6 +84,15 @@ class DenialReason(str, Enum):
     GATEWAY_REFUSED = "gateway_refused"
     GATEWAY_ERROR = "gateway_error"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    PLAN_REQUIRED = "plan_required"
+    APPROVAL_INVALID = "approval_invalid"
+    APPROVAL_EXPIRED = "approval_expired"
+    PLAN_MISMATCH = "plan_mismatch"
+    TARGET_CHANGED = "target_changed"
+    EXECUTOR_REFUSED = "executor_refused"
+    LIMIT_EXCEEDED = "limit_exceeded"
+    PLAN_REPLAYED = "plan_replayed"
+    CROSS_DEVICE = "cross_device"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -97,6 +112,15 @@ _DENIAL_CATEGORY: dict[DenialReason, str] = {
     DenialReason.GATEWAY_REFUSED: "policy_denial",
     DenialReason.GATEWAY_ERROR: "anomaly",
     DenialReason.CONFIRMATION_REQUIRED: "policy_denial",
+    DenialReason.PLAN_REQUIRED: "policy_denial",
+    DenialReason.APPROVAL_INVALID: "policy_denial",
+    DenialReason.APPROVAL_EXPIRED: "policy_denial",
+    DenialReason.PLAN_MISMATCH: "policy_denial",
+    DenialReason.TARGET_CHANGED: "anomaly",
+    DenialReason.EXECUTOR_REFUSED: "policy_denial",
+    DenialReason.LIMIT_EXCEEDED: "policy_denial",
+    DenialReason.PLAN_REPLAYED: "policy_denial",
+    DenialReason.CROSS_DEVICE: "policy_denial",
     DenialReason.INTERNAL_ERROR: "anomaly",
 }
 
@@ -114,11 +138,36 @@ _DENIAL_SEVERITY: dict[DenialReason, str] = {
     DenialReason.GATEWAY_REFUSED: "MEDIUM",
     DenialReason.GATEWAY_ERROR: "MEDIUM",
     DenialReason.CONFIRMATION_REQUIRED: "LOW",
+    DenialReason.PLAN_REQUIRED: "MEDIUM",
+    DenialReason.APPROVAL_INVALID: "HIGH",
+    DenialReason.APPROVAL_EXPIRED: "LOW",
+    DenialReason.PLAN_MISMATCH: "HIGH",
+    DenialReason.TARGET_CHANGED: "HIGH",
+    DenialReason.EXECUTOR_REFUSED: "MEDIUM",
+    DenialReason.LIMIT_EXCEEDED: "MEDIUM",
+    DenialReason.PLAN_REPLAYED: "HIGH",
+    DenialReason.CROSS_DEVICE: "MEDIUM",
     DenialReason.INTERNAL_ERROR: "HIGH",
 }
 
 assert set(_DENIAL_CATEGORY) == set(DenialReason), "every denial needs a category"
 assert set(_DENIAL_SEVERITY) == set(DenialReason), "every denial needs a severity"
+
+
+#: Executor refusal -> denial reason. Kept here so the executor does not need
+#: to import the security engine.
+_EXECUTOR_DENIAL: dict[str, DenialReason] = {
+    "target_missing": DenialReason.TARGET_CHANGED,
+    "target_changed": DenialReason.TARGET_CHANGED,
+    "scope_mismatch": DenialReason.SCOPE_MISMATCH,
+    "approval_invalid": DenialReason.APPROVAL_INVALID,
+    "approval_expired": DenialReason.APPROVAL_EXPIRED,
+    "plan_replayed": DenialReason.PLAN_REPLAYED,
+    "cross_device": DenialReason.CROSS_DEVICE,
+    "limit_exceeded": DenialReason.LIMIT_EXCEEDED,
+    "executor_unavailable": DenialReason.EXECUTOR_REFUSED,
+    "executor_refused": DenialReason.EXECUTOR_REFUSED,
+}
 
 
 class PolicyDecision(BaseModel):
@@ -131,63 +180,115 @@ class PolicyDecision(BaseModel):
     risk: RiskClass
     source: str = "local"
     policy_id: str | None = None
+    input_doc: dict[str, Any] = Field(default_factory=dict)
+    latency_ms: float | None = None
 
 
 class PolicyEngine(Protocol):
-    """Interface the OPA client will implement in v0.4."""
+    def evaluate(
+        self,
+        request: ActionRequest,
+        risk: RiskClass,
+        capability: CapabilityCheck | None = None,
+        *,
+        plan: Plan | None = None,
+        approval: ApprovalGrant | None = None,
+    ) -> PolicyDecision: ...
 
-    def evaluate(self, request: ActionRequest, risk: RiskClass) -> PolicyDecision: ...
+
+DEFAULT_POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
 
 
-class LocalPolicyEngine:
-    """Deny-by-default policy used until OPA is wired in.
+class RegoPolicyEngine:
+    """Policy engine that evaluates the packaged Rego file.
 
-    The rule set is intentionally trivial and hard-coded rather than
-    configurable: this is the fallback that must not be tunable by whatever
-    the AI is doing.
-
-    MEDIUM returns CONFIRM, not DENY. The two mean different things — DENY
-    says "this will never be allowed", CONFIRM says "this is allowed if a
-    human agrees" — and collapsing them would make the audit trail lie about
-    whether the action is permanently forbidden. Whether a confirmation is
-    actually available is the engine's question, not the policy's.
+    Authorization rules live in ``aios/policies/authz.rego`` and its data
+    document — not in Python. This class only transports an input document
+    and parses the decision. If OPA cannot run, the result is DENY.
     """
 
-    #: Actions this build will never authorize regardless of capability.
-    ALWAYS_DENY: frozenset[str] = frozenset(FORBIDDEN_ACTION_NAMES)
+    def __init__(
+        self,
+        policy_dir: str | Path | None = None,
+        binary: str = "opa",
+        timeout_s: float = 5.0,
+    ) -> None:
+        self.policy_dir = Path(policy_dir or DEFAULT_POLICY_DIR)
+        # An empty or missing directory would silently deny everything; use
+        # the packaged policy instead, which is still the deny-by-default set.
+        if not (self.policy_dir / "authz.rego").exists():
+            self.policy_dir = DEFAULT_POLICY_DIR
+        self.binary = binary if Path(binary).is_absolute() else shutil.which(binary)
+        self.timeout_s = timeout_s
 
-    #: Risk at or above which a human must agree.
-    CONFIRM_AT_OR_ABOVE: RiskClass = RiskClass.MEDIUM
-
-    def evaluate(self, request: ActionRequest, risk: RiskClass) -> PolicyDecision:
-        name = request.action_name
-        if name in self.ALWAYS_DENY:
-            return PolicyDecision(
-                decision=Decision.DENY,
-                reason=f"{name} is permanently denied by policy",
-                risk=risk,
-                source="local:denylist",
-            )
-        if risk.rank >= RiskClass.CRITICAL.rank:
-            return PolicyDecision(
-                decision=Decision.DENY,
-                reason="risk class CRITICAL is never authorized",
-                risk=risk,
-                source="local:risk-ceiling",
-            )
-        if risk.rank >= self.CONFIRM_AT_OR_ABOVE.rank:
-            return PolicyDecision(
-                decision=Decision.CONFIRM,
-                reason=f"risk class {risk.value} requires explicit user confirmation",
-                risk=risk,
-                source="local:confirm-required",
-            )
-        return PolicyDecision(
-            decision=Decision.ALLOW,
-            reason=f"risk class {risk.value} is allowed by local policy",
-            risk=risk,
-            source="local:allow-low",
+    def evaluate(
+        self,
+        request: ActionRequest,
+        risk: RiskClass,
+        capability: CapabilityCheck | None = None,
+        *,
+        plan: Plan | None = None,
+        approval: ApprovalGrant | None = None,
+    ) -> PolicyDecision:
+        started = time.perf_counter()
+        document = build_policy_input(
+            request, risk, capability, plan=plan, approval=approval
         )
+        return self._evaluate_document(document, risk, started)
+
+    def _evaluate_document(
+        self,
+        document: dict[str, Any],
+        risk: RiskClass,
+        started: float,
+    ) -> PolicyDecision:
+        def unavailable(reason: str) -> PolicyDecision:
+            return PolicyDecision(
+                decision=Decision.DENY,
+                reason=reason[:1000],
+                risk=risk,
+                source="rego:unavailable",
+                input_doc=document,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+            )
+
+        if not self.binary:
+            return unavailable("OPA binary not found; policy cannot be evaluated")
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed binary and argv
+                [
+                    str(self.binary),
+                    "eval",
+                    "--format=json",
+                    "--stdin-input",
+                    "--data",
+                    str(self.policy_dir),
+                    "data.aios.authz.decision",
+                ],
+                input=json.dumps(document),
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
+            if result.returncode != 0:
+                return unavailable(f"OPA exited {result.returncode}")
+            payload = json.loads(result.stdout)
+            value = payload["result"][0]["expressions"][0]["value"]
+            decision = Decision(str(value["decision"]))
+            if decision not in (Decision.ALLOW, Decision.DENY, Decision.CONFIRM):
+                raise ValueError("unknown policy decision")
+            return PolicyDecision(
+                decision=decision,
+                reason=str(value.get("reason", ""))[:1000],
+                risk=risk,
+                source="rego",
+                policy_id=value.get("policy_id"),
+                input_doc=document,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+            )
+        except Exception as exc:
+            return unavailable(f"OPA evaluation failed: {type(exc).__name__}")
 
 
 class LedgerRecord(BaseModel):
@@ -254,6 +355,7 @@ class Verdict(BaseModel):
     policy: PolicyDecision | None = None
     result: ActionResult | None = None
     observation: Observation | None = None
+    executed: bool = False
     at: datetime = Field(default_factory=utcnow)
     duration_ms: float | None = None
 
@@ -268,10 +370,14 @@ class SecurityEngine:
         policy: PolicyEngine | None = None,
         ledger: ActionLedger | None = None,
         security_event_recorder: Callable[..., Any] | None = None,
+        executor: QuarantineExecutor | None = None,
     ) -> None:
         self.gateway = gateway
+        #: Mutation executor. Kept separate from the read-only gateway so a
+        #: single dispatch table never mixes reads and writes.
+        self.executor = executor
         self.capabilities = capability_manager or CapabilityManager()
-        self.policy = policy or LocalPolicyEngine()
+        self.policy = policy or RegoPolicyEngine()
         self.ledger = ledger if ledger is not None else InMemoryLedger()
         #: Optional sink for security events (PostgresLedger in production).
         #: Denials are forwarded here so the detection-rate measurement reads
@@ -337,33 +443,61 @@ class SecurityEngine:
 
     # ------------------------------------------------------------ pipeline
 
-    def authorize(self, request: ActionRequest) -> Verdict:
+    def authorize(
+        self,
+        request: ActionRequest,
+        *,
+        plan: Plan | None = None,
+        approval: ApprovalGrant | None = None,
+    ) -> Verdict:
         """Run every check *except* execution. Used by the v0.4 API's
         dry-run mode and by tests that assert a denial without side effects."""
-        return self._pipeline(request, execute=False)
+        return self._pipeline(request, execute=False, plan=plan, approval=approval)
 
-    def process(self, request: ActionRequest) -> Verdict:
+    def process(
+        self,
+        request: ActionRequest,
+        *,
+        plan: Plan | None = None,
+        approval: ApprovalGrant | None = None,
+    ) -> Verdict:
         """Full path: validate → authorize → execute, logging each transition."""
-        return self._pipeline(request, execute=True)
+        return self._pipeline(request, execute=True, plan=plan, approval=approval)
 
-    def _pipeline(self, request: ActionRequest, execute: bool) -> Verdict:
+    def _pipeline(
+        self,
+        request: ActionRequest,
+        execute: bool,
+        plan: Plan | None = None,
+        approval: ApprovalGrant | None = None,
+    ) -> Verdict:
         started = time.perf_counter()
         name = request.action_name
         state = ActionState.PROPOSED
         risk = risk_for(name)
+        self._record_action_request(request)
 
         # 1. Protocol validation. parse_ai_payload is not used here because the
         #    caller already holds a validated request, but the checks are
         #    repeated so a hand-constructed object cannot skip them.
+        if request.trust_domain in TRUSTED_DOMAINS:
+            return self._deny(
+                request, state, Decision.DENY, risk, DenialReason.POLICY_DENY,
+                "agent proposals may not claim a trusted origin", started,
+            )
         if name in FORBIDDEN_ACTION_NAMES:
             return self._deny(
                 request, state, Decision.DENY, risk, DenialReason.FORBIDDEN_ACTION,
                 f"{name} is forbidden", started,
             )
-        if name not in self.gateway.supported_actions:
+        served_by_gateway = name in self.gateway.supported_actions
+        served_by_executor = bool(
+            self.executor and name in self.executor.supported_actions
+        )
+        if not (served_by_gateway or served_by_executor):
             return self._deny(
                 request, state, Decision.DENY, risk, DenialReason.NOT_IN_PROTOCOL,
-                f"{name} is not in the gateway whitelist", started,
+                f"{name} is not in the execution whitelist", started,
             )
         if request.trust_domain is TrustDomain.T4_EXTERNAL and name in PATH_PARAM_ACTIONS:
             # External content asking for a path is the canonical injection
@@ -401,16 +535,26 @@ class SecurityEngine:
             )
 
         # 4. Policy decision — deterministic, independent of the model.
-        policy = self.policy.evaluate(request, risk)
+        policy_started = time.perf_counter()
+        policy = self.policy.evaluate(
+            request, risk, check, plan=plan, approval=approval
+        )
+        policy_latency_ms = (time.perf_counter() - policy_started) * 1000.0
+        self._record_policy_decision(request, policy, policy_latency_ms)
         self._log(
             request, ActionState.VALIDATED, risk, policy.decision, policy.reason,
             capability=check.matched_capability, target=target,
             policy_source=policy.source,
         )
         if policy.decision is Decision.DENY:
+            denial = (
+                DenialReason.POLICY_UNAVAILABLE
+                if policy.source.endswith(":unavailable")
+                else DenialReason.POLICY_DENY
+            )
             return self._verdict(
                 request, ActionState.VALIDATED, Decision.DENY, risk, policy.reason,
-                DenialReason.POLICY_DENY, capability=check, policy=policy, started=started,
+                denial, capability=check, policy=policy, started=started,
             )
         if policy.decision is Decision.CONFIRM:
             return self._verdict(
@@ -433,6 +577,64 @@ class SecurityEngine:
             )
 
         # 6. EXECUTE, only reachable from AUTHORIZED.
+        if served_by_executor:
+            if self.executor is None or plan is None or approval is None:
+                return self._verdict(
+                    request, state, Decision.DENY, risk,
+                    "mutation requires an approved plan", DenialReason.PLAN_REQUIRED,
+                    capability=check, policy=policy, started=started,
+                )
+            mutation_started = time.perf_counter()
+            try:
+                step_result = self.executor.execute(
+                    request, plan=plan, approval=approval
+                )
+            except ExecutorError as exc:
+                return self._verdict(
+                    request, state, Decision.DENY, risk, str(exc),
+                    _EXECUTOR_DENIAL.get(exc.reason, DenialReason.EXECUTOR_REFUSED),
+                    capability=check, policy=policy, started=started,
+                )
+            except Exception as exc:
+                return self._verdict(
+                    request, state, Decision.DENY, risk,
+                    f"{type(exc).__name__}: {exc}",
+                    DenialReason.INTERNAL_ERROR, capability=check, policy=policy,
+                    started=started,
+                )
+            duration_ms = (time.perf_counter() - mutation_started) * 1000.0
+            self._log(
+                request, ActionState.EXECUTED, risk, Decision.ALLOW,
+                f"{name} applied", capability=check.matched_capability,
+                target=target, duration_ms=duration_ms,
+            )
+            self._transition(
+                request, ActionState.EXECUTED, ActionState.COMPLETED, risk,
+                Decision.ALLOW, "mutation completed", duration_ms=duration_ms,
+            )
+            result = ActionResult(
+                action_id=request.action_id,
+                state=ActionState.COMPLETED,
+                success=True,
+                data=step_result.model_dump(mode="json"),
+                source="executor:quarantine",
+                trust_domain=TrustDomain.T1_SECURITY,
+                duration_ms=duration_ms,
+            )
+            return Verdict(
+                action_id=request.action_id,
+                action=name,
+                state=ActionState.COMPLETED,
+                decision=Decision.ALLOW,
+                risk=risk,
+                reason=policy.reason,
+                capability=check,
+                policy=policy,
+                result=result,
+                executed=True,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+            )
+
         try:
             observation, duration_ms = self.gateway.execute_timed(request)
         except (ActionNotPermitted, PreconditionFailed) as exc:
@@ -497,6 +699,7 @@ class SecurityEngine:
             policy=policy,
             result=result,
             observation=observation,
+            executed=True,
             duration_ms=(time.perf_counter() - started) * 1000.0,
         )
 
@@ -600,6 +803,38 @@ class SecurityEngine:
             policy=policy,
             duration_ms=(time.perf_counter() - started) * 1000.0 if started else None,
         )
+
+    def _record_action_request(self, request: ActionRequest) -> None:
+        """Persist the raw proposal before any decision is made."""
+        recorder = getattr(self.ledger, "record_action_request", None)
+        if recorder is None:
+            return
+        try:
+            recorder(request)
+        except Exception:
+            self.ledger_errors += 1
+            log.exception("failed to persist proposal %s", request.action_id)
+
+    def _record_policy_decision(
+        self,
+        request: ActionRequest,
+        policy: PolicyDecision,
+        latency_ms: float,
+    ) -> None:
+        """Persist the policy input and verdict for this action."""
+        recorder = getattr(self.ledger, "record_policy_decision", None)
+        if recorder is None:
+            return
+        try:
+            recorder(
+                request.action_id,
+                policy,
+                input_doc=policy.input_doc,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            self.ledger_errors += 1
+            log.exception("failed to persist policy decision for %s", request.action_id)
 
     def _record_security_event(
         self,

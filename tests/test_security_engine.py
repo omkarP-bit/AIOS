@@ -21,8 +21,8 @@ from aios.security import (
     Decision,
     DenialReason,
     InMemoryLedger,
-    LocalPolicyEngine,
     PolicyDecision,
+    RegoPolicyEngine,
     RiskClass,
     SecurityEngine,
     make_ai_request,
@@ -147,8 +147,8 @@ def test_file_content_is_treated_as_untrusted_external_data(
         default_grants=[Capability(action="filesystem.read", scope=(f"{scope_dir}/*",))]
     )
 
-    class AlwaysConfirmIsNeverEnough(LocalPolicyEngine):
-        def evaluate(self, request, risk):  # type: ignore[no-untyped-def]
+    class AlwaysConfirmIsNeverEnough(RegoPolicyEngine):
+        def evaluate(self, request, risk, capability=None, *, plan=None, approval=None):  # type: ignore[no-untyped-def]
             return PolicyDecision(
                 decision=Decision.ALLOW, reason="test override", risk=risk, source="test"
             )
@@ -326,7 +326,7 @@ def test_medium_risk_requires_confirmation_by_default(
         default_grants=[Capability(action="filesystem.read", scope=("/tmp/*",))]
     )
     engine = SecurityEngine(
-        gateway, capability_manager=manager, ledger=ledger, policy=LocalPolicyEngine()
+        gateway, capability_manager=manager, ledger=ledger, policy=RegoPolicyEngine()
     )
     verdict = engine.process(make_ai_request("filesystem.read", {"path": "/tmp/x"}))
     assert verdict.decision is Decision.CONFIRM
@@ -335,15 +335,20 @@ def test_medium_risk_requires_confirmation_by_default(
 
 
 def test_policy_allow_only_for_low_risk(gateway: OSGateway) -> None:
-    policy = LocalPolicyEngine()
+    policy = RegoPolicyEngine()
+    manager = CapabilityManager()
     for action in ("system.cpu", "process.list", "network.connections"):
         request = make_ai_request(action)
-        assert policy.evaluate(request, RiskClass.LOW).decision is Decision.ALLOW
+        check = manager.check("local-agent", action, None)
+        assert policy.evaluate(request, RiskClass.LOW, check).decision is Decision.ALLOW
 
 
 def test_policy_denies_critical(gateway: OSGateway) -> None:
-    policy = LocalPolicyEngine()
-    decision = policy.evaluate(make_ai_request("system.cpu"), RiskClass.CRITICAL)
+    policy = RegoPolicyEngine()
+    manager = CapabilityManager()
+    request = make_ai_request("system.cpu")
+    check = manager.check("local-agent", "system.cpu", None)
+    decision = policy.evaluate(request, RiskClass.CRITICAL, check)
     assert decision.decision is Decision.DENY
 
 
@@ -355,7 +360,7 @@ def test_policy_denial_overrides_a_valid_capability(
         default_grants=[Capability(action="filesystem.read", scope=("/tmp/*",))]
     )
     engine = SecurityEngine(
-        gateway, capability_manager=manager, ledger=ledger, policy=LocalPolicyEngine()
+        gateway, capability_manager=manager, ledger=ledger, policy=RegoPolicyEngine()
     )
     verdict = engine.process(make_ai_request("filesystem.read", {"path": "/tmp/x"}))
     assert verdict.decision is Decision.CONFIRM

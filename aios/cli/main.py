@@ -8,9 +8,9 @@ Two families of commands:
     aios validate|schema|actions
         Action Protocol tooling, no execution.
 
-Execution (`aios actions run`, `aios ask`) is added in v0.4 when the security
-engine and ledger exist, so that no command can currently reach the gateway
-without passing through authorization.
+Execution is available through `aios act` and `aios ask`, both of which pass
+through the Security Engine. No command reaches the gateway without passing
+through authorization.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ def _gateway() -> OSGateway:
         sys_root=s.sys_root,
         max_read_bytes=s.max_read_bytes,
         max_dir_entries=s.max_dir_entries,
+        quarantine_dir=s.quarantine_dir,
     )
 
 
@@ -103,6 +104,359 @@ def _observe(
 def _fail(exc: Exception) -> None:
     err_console.print(f"[bold red]error:[/] {exc}")
     raise typer.Exit(code=1)
+
+
+cleanup_app = typer.Typer(
+    help="Scan for cleanup candidates, then quarantine or restore under an approved plan.",
+    no_args_is_help=True,
+)
+app.add_typer(cleanup_app, name="cleanup")
+
+
+@cleanup_app.command("scan")
+def cleanup_scan(
+    path: Annotated[Path, typer.Argument(help="Directory to scan")],
+    min_age_days: Annotated[int, typer.Option(help="Only files older than this")] = 30,
+    min_size_bytes: Annotated[int, typer.Option(help="Only files at least this large")] = 0,
+    max_candidates: Annotated[int, typer.Option(help="Hard candidate cap")] = 500,
+    include_hidden: Annotated[bool, typer.Option(help="Include dotfiles")] = False,
+    plan_out: Annotated[
+        Path | None,
+        typer.Option("--plan-out", help="Write the plan JSON here for operator approval"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Read-only scan. Produces an immutable plan; never moves a file."""
+    from aios.actions.plans import Plan
+    from aios.runtime import security_engine
+    from aios.security import Capability, CapabilityManager, Decision, make_ai_request
+
+    settings = _settings()
+    resolved = path.expanduser().resolve()
+    if not resolved.is_dir():
+        _fail(NotADirectoryError(f"not a directory: {resolved}"))
+        return
+
+    # The operator is the caller here. The grant is exact-path, in-memory,
+    # and never persisted; the AI path cannot obtain it.
+    manager = CapabilityManager()
+    manager.grant(
+        "local-agent",
+        Capability(
+            action="filesystem.cleanup_scan",
+            scope=(str(resolved),),
+            granted_by="operator-cli",
+            reason="interactive cleanup scan",
+        ),
+    )
+    request = make_ai_request(
+        "filesystem.cleanup_scan",
+        {
+            "path": str(resolved),
+            "min_age_days": min_age_days,
+            "min_size_bytes": min_size_bytes,
+            "max_candidates": max_candidates,
+            "include_hidden": include_hidden,
+        },
+        intent=f"scan {resolved} for cleanup candidates",
+    )
+    with security_engine(settings, _gateway(), capabilities=manager) as engine:
+        verdict = engine.process(request)
+
+    if verdict.decision is not Decision.ALLOW or verdict.observation is None:
+        reason = verdict.denial_reason.value if verdict.denial_reason else verdict.reason
+        err_console.print(f"[bold red]DENIED[/] {reason}")
+        raise typer.Exit(code=1)
+
+    scan = verdict.observation.data
+    plan = Plan.from_candidates(
+        list(scan.candidates),
+        root=scan.root,
+        intent=f"cleanup candidates under {scan.root}",
+        max_items=max(max_candidates, 1),
+    )
+    if plan_out is not None:
+        plan_out.expanduser().write_text(
+            json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
+        )
+
+    if json_out:
+        _dump({"scan": scan.model_dump(mode="json"), "plan": plan.to_dict()})
+        return
+
+    console.print(f"[bold]scan[/] {scan.root}")
+    console.print(f"  candidates: {scan.total}")
+    console.print(f"  bytes:      {scan.total_bytes}")
+    console.print(f"  skipped:    {scan.skipped}")
+    console.print(f"  plan:       {plan.plan_id}")
+    console.print(f"  hash:       {plan.plan_hash}")
+    if plan_out is not None:
+        console.print(f"  plan file:  {plan_out.expanduser().resolve()}")
+    else:
+        console.print("[dim]  use --plan-out PATH to write the plan for approval[/]")
+    if scan.total:
+        table = Table(title="candidates")
+        table.add_column("id")
+        table.add_column("bytes", justify="right")
+        table.add_column("path")
+        for candidate in scan.candidates[:20]:
+            table.add_row(
+                candidate.candidate_id, f"{candidate.size_bytes:,}", candidate.path
+            )
+        console.print(table)
+        if scan.total > 20:
+            console.print(f"[dim]... {scan.total - 20} more[/]")
+
+
+@cleanup_app.command("quarantine")
+def cleanup_quarantine(
+    plan_file: Annotated[Path, typer.Argument(help="Plan JSON written by cleanup scan")],
+    confirm_plan_hash: Annotated[
+        str,
+        typer.Option("--confirm-plan-hash", help="Exact plan hash being approved"),
+    ],
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Move plan candidates into quarantine. Requires the exact plan hash."""
+    import os
+    import secrets
+
+    from aios.actions.plans import ApprovalAuthority, ApprovalError, Plan
+    from aios.runtime import security_engine
+    from aios.security import Capability, CapabilityManager, Decision, make_ai_request
+
+    settings = _settings()
+    try:
+        plan = Plan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
+    except Exception as exc:
+        _fail(exc)
+        return
+    if confirm_plan_hash != plan.plan_hash:
+        err_console.print(
+            "[bold red]DENIED[/] plan hash does not match; nothing was moved"
+        )
+        raise typer.Exit(code=1)
+    if not plan.steps:
+        console.print("empty plan; nothing to do")
+        return
+
+    secret = (
+        settings.approval_secret.encode()
+        if settings.approval_secret
+        else secrets.token_bytes(32)
+    )
+    authority = ApprovalAuthority(secret, ttl_s=settings.approval_ttl_s)
+    token = authority.mint(plan, approved_by=f"uid:{os.getuid()}")
+    try:
+        approval = authority.verify(token, plan, consume=True)
+    except ApprovalError as exc:
+        _fail(exc)
+        return
+
+    manager = CapabilityManager()
+    manager.grant(
+        "local-agent",
+        Capability(
+            action="filesystem.quarantine",
+            scope=tuple(step.path for step in plan.steps),
+            granted_by="operator-cli",
+            reason=f"approved plan {plan.plan_id}",
+        ),
+    )
+    manager.grant(
+        "local-agent",
+        Capability(
+            action="filesystem.restore",
+            scope=tuple(step.path for step in plan.rollback),
+            granted_by="operator-cli",
+            reason=f"rollback for plan {plan.plan_id}",
+        ),
+    )
+
+    records: list[dict[str, Any]] = []
+    completed: list[Any] = []
+    failed: dict[str, Any] | None = None
+    with security_engine(settings, _gateway(), capabilities=manager) as engine:
+        for step in plan.steps:
+            request = make_ai_request(
+                "filesystem.quarantine",
+                {
+                    "path": step.path,
+                    "plan_id": plan.plan_id,
+                    "candidate_id": step.candidate_id,
+                },
+                intent=plan.intent,
+            )
+            verdict = engine.process(request, plan=plan, approval=approval)
+            records.append(
+                {
+                    "candidate_id": step.candidate_id,
+                    "path": step.path,
+                    "decision": verdict.decision.value,
+                    "state": verdict.state.value,
+                    "reason": verdict.reason,
+                    "denial_reason": (
+                        verdict.denial_reason.value if verdict.denial_reason else None
+                    ),
+                    "result": (
+                        verdict.result.data if verdict.result else None
+                    ),
+                }
+            )
+            if verdict.decision is Decision.ALLOW and verdict.executed:
+                completed.append(step)
+                continue
+            failed = records[-1]
+            break
+
+        rollback: list[dict[str, Any]] = []
+        if failed is not None and completed:
+            for step in reversed(completed):
+                request = make_ai_request(
+                    "filesystem.restore",
+                    {
+                        "path": step.path,
+                        "plan_id": plan.plan_id,
+                        "candidate_id": step.candidate_id,
+                    },
+                    intent=f"rollback {plan.plan_id}",
+                )
+                verdict = engine.process(request, plan=plan, approval=approval)
+                rollback.append(
+                    {
+                        "candidate_id": step.candidate_id,
+                        "decision": verdict.decision.value,
+                        "reason": verdict.reason,
+                    }
+                )
+
+    payload = {
+        "plan_id": plan.plan_id,
+        "plan_hash": plan.plan_hash,
+        "steps": records,
+        "rollback": rollback,
+        "applied": len(completed) if failed is None else 0,
+        "failed": failed,
+    }
+    if json_out:
+        _dump(payload)
+    else:
+        console.print(f"[bold]plan[/] {plan.plan_id}")
+        for record in records:
+            colour = "green" if record["decision"] == "ALLOW" else "red"
+            console.print(
+                f"  [{colour}]{record['decision']}[/] {record['path']}"
+            )
+        if failed is not None:
+            err_console.print(
+                f"[bold red]failed[/] {failed['path']} "
+                f"({failed['denial_reason'] or failed['reason']})"
+            )
+            if rollback:
+                err_console.print(f"rolled back {len(rollback)} step(s)")
+    if failed is not None:
+        raise typer.Exit(code=1)
+
+
+@cleanup_app.command("restore")
+def cleanup_restore(
+    plan_file: Annotated[Path, typer.Argument(help="Plan JSON used for quarantine")],
+    confirm_plan_hash: Annotated[
+        str,
+        typer.Option("--confirm-plan-hash", help="Exact plan hash being approved"),
+    ],
+    candidate: Annotated[
+        str | None,
+        typer.Option("--candidate", help="Restore only this candidate id"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Restore quarantined candidates to their recorded original paths."""
+    import os
+    import secrets
+
+    from aios.actions.plans import ApprovalAuthority, ApprovalError, Plan
+    from aios.runtime import security_engine
+    from aios.security import Capability, CapabilityManager, make_ai_request
+
+    settings = _settings()
+    try:
+        plan = Plan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
+    except Exception as exc:
+        _fail(exc)
+        return
+    if confirm_plan_hash != plan.plan_hash:
+        err_console.print(
+            "[bold red]DENIED[/] plan hash does not match; nothing was restored"
+        )
+        raise typer.Exit(code=1)
+
+    steps = [
+        step for step in plan.rollback
+        if candidate is None or step.candidate_id == candidate
+    ]
+    if not steps:
+        console.print("no matching restore steps")
+        return
+
+    secret = (
+        settings.approval_secret.encode()
+        if settings.approval_secret
+        else secrets.token_bytes(32)
+    )
+    authority = ApprovalAuthority(secret, ttl_s=settings.approval_ttl_s)
+    token = authority.mint(plan, approved_by=f"uid:{os.getuid()}")
+    try:
+        approval = authority.verify(token, plan, consume=True)
+    except ApprovalError as exc:
+        _fail(exc)
+        return
+
+    manager = CapabilityManager()
+    manager.grant(
+        "local-agent",
+        Capability(
+            action="filesystem.restore",
+            scope=tuple(step.path for step in steps),
+            granted_by="operator-cli",
+            reason=f"approved restore for {plan.plan_id}",
+        ),
+    )
+
+    records: list[dict[str, Any]] = []
+    with security_engine(settings, _gateway(), capabilities=manager) as engine:
+        for step in steps:
+            request = make_ai_request(
+                "filesystem.restore",
+                {
+                    "path": step.path,
+                    "plan_id": plan.plan_id,
+                    "candidate_id": step.candidate_id,
+                },
+                intent=f"restore {plan.plan_id}",
+            )
+            verdict = engine.process(request, plan=plan, approval=approval)
+            records.append(
+                {
+                    "candidate_id": step.candidate_id,
+                    "path": step.path,
+                    "decision": verdict.decision.value,
+                    "state": verdict.state.value,
+                    "reason": verdict.reason,
+                    "denial_reason": (
+                        verdict.denial_reason.value if verdict.denial_reason else None
+                    ),
+                }
+            )
+
+    if json_out:
+        _dump({"plan_id": plan.plan_id, "steps": records})
+    else:
+        for record in records:
+            colour = "green" if record["decision"] == "ALLOW" else "red"
+            console.print(f"  [{colour}]{record['decision']}[/] {record['path']}")
+    if any(record["decision"] != "ALLOW" for record in records):
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -1292,12 +1646,12 @@ def act(
                 "reason": verdict.reason,
                 "denial_reason": verdict.denial_reason.value if verdict.denial_reason else None,
                 "capability": verdict.capability.matched_capability if verdict.capability else None,
-                "executed": verdict.observation is not None,
+                "executed": verdict.executed,
                 "duration_ms": verdict.duration_ms,
             }
         )
     elif verdict.decision is Decision.ALLOW:
-        colour = "green" if verdict.observation else "yellow"
+        colour = "green" if verdict.executed else "yellow"
         console.print(f"[bold {colour}]{verdict.decision.value}[/] {verdict.action}")
         console.print(f"  state:     {verdict.state.value}")
         console.print(f"  risk:      {verdict.risk.value}")
@@ -1317,6 +1671,122 @@ def act(
 
     if verdict.decision is Decision.DENY:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def ask(
+    question: Annotated[str, typer.Argument(help="What should AIOS look at?")],
+    execute: Annotated[
+        bool,
+        typer.Option(
+            "--execute",
+            help="Run the proposal after authorization (default: authorize only)",
+        ),
+    ] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Ask the model for an observation proposal.
+
+    The model's answer is parsed into the closed Action Protocol and then
+    handled exactly like a hand-written proposal: capability, policy, audit.
+    Without --execute the action is authorized but never run.
+    """
+    from aios.ai import (
+        Planner,
+        ProposalError,
+        ProviderError,
+        build_provider,
+        build_snapshot,
+        plan_to_dict,
+        provider_status,
+        render_snapshot,
+    )
+    from aios.runtime import security_engine
+    from aios.security import Decision
+
+    settings = _settings()
+    status = provider_status(settings)
+    if status["external"]:
+        err_console.print(
+            f"[yellow]note:[/] using external provider {status['provider']} "
+            f"({status['model']}); compact system context leaves this machine. "
+            "No file contents are sent."
+        )
+    try:
+        provider = build_provider(settings)
+    except ProviderError as exc:
+        _fail(exc)
+        return
+
+    gateway = _gateway()
+    try:
+        snapshot = build_snapshot(gateway)
+        plan = Planner(provider).propose(question, render_snapshot(snapshot))
+    except (ProviderError, ProposalError, OSError, ValueError) as exc:
+        _fail(exc)
+        return
+
+    if plan.request is None:
+        if json_out:
+            _dump(plan_to_dict(plan))
+        else:
+            console.print(f"[yellow]no action[/] {plan.reason or 'model declined to propose one'}")
+        return
+
+    with security_engine(settings, gateway) as engine:
+        verdict = engine.process(plan.request) if execute else engine.authorize(plan.request)
+
+    payload = {
+        **plan_to_dict(plan),
+        "action_id": verdict.action_id,
+        "state": verdict.state.value,
+        "decision": verdict.decision.value,
+        "risk": verdict.risk.value,
+        "reason": verdict.reason,
+        "denial_reason": verdict.denial_reason.value if verdict.denial_reason else None,
+        "executed": verdict.executed,
+    }
+    if json_out:
+        _dump(payload)
+    else:
+        console.print(f"[bold]proposal[/] {verdict.action}")
+        console.print(f"  provider:  {plan.provider} ({plan.model})")
+        console.print(f"  prompt:    sha256:{plan.prompt_hash[:16]}")
+        console.print(f"  params:    {json.dumps(plan.request.params, default=str)}")
+        if plan.request.intent:
+            console.print(f"  intent:    {plan.request.intent}")
+        if verdict.decision is Decision.ALLOW:
+            colour = "green" if verdict.executed else "yellow"
+            console.print(f"[bold {colour}]{verdict.decision.value}[/] state={verdict.state.value}")
+            if verdict.observation:
+                _dump(verdict.observation.data)
+            else:
+                console.print("  [dim]authorized, not executed (pass --execute to run)[/]")
+        else:
+            reason = verdict.denial_reason.value if verdict.denial_reason else "-"
+            err_console.print(
+                f"[bold red]{verdict.decision.value}[/] ({reason}) {verdict.reason}"
+            )
+    if verdict.decision is Decision.DENY:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def provider(
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show the configured model provider without revealing secrets."""
+    from aios.ai import provider_status
+
+    status = provider_status(_settings())
+    if json_out:
+        _dump(status)
+        return
+    console.print(f"provider: {status['provider']}")
+    console.print(f"model:    {status['model']}")
+    console.print(f"external: {status['external']}")
+    console.print(f"allowed:  {status['external_allowed']}")
+    console.print(f"ready:    {status['configured']}")
 
 
 db_app = typer.Typer(help="Audit ledger and database schema.", no_args_is_help=True)

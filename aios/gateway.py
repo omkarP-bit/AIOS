@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aios.actions.scanner import scan_candidates
 from aios.models.actions import (
     ActionRequest,
+    FilesystemCleanupScanParams,
     FilesystemListParams,
     FilesystemReadParams,
     FilesystemStatParams,
@@ -84,11 +86,13 @@ class OSGateway:
         sys_root: Path | None = None,
         max_read_bytes: int = 1_048_576,
         max_dir_entries: int = 2000,
+        quarantine_dir: Path | None = None,
     ) -> None:
         self.proc_root = Path(proc_root or "/proc")
         self.sys_root = Path(sys_root or self.proc_root.parent / "sys")
         self.max_read_bytes = max_read_bytes
         self.max_dir_entries = max_dir_entries
+        self.quarantine_dir = Path(quarantine_dir) if quarantine_dir else None
 
         self._cpu = cpu_obs.CpuObserver(self.proc_root, self.sys_root)
         self._process = proc_obs.ProcessObserver(self.proc_root)
@@ -108,6 +112,7 @@ class OSGateway:
             "filesystem.list": self._h_filesystem_list,
             "filesystem.stat": self._h_filesystem_stat,
             "filesystem.read": self._h_filesystem_read,
+            "filesystem.cleanup_scan": self._h_filesystem_cleanup_scan,
         }
 
     @property
@@ -275,6 +280,23 @@ class OSGateway:
             origin=DataOrigin.EXTERNAL,
         )
 
+    def _h_filesystem_cleanup_scan(self, p: FilesystemCleanupScanParams) -> HandlerResult:
+        target = Path(p.path)
+        if fs_obs.is_sensitive(target):
+            raise PreconditionFailed(f"path is outside the readable set: {p.path}")
+        try:
+            result = scan_candidates(
+                target,
+                min_age_days=p.min_age_days,
+                min_size_bytes=p.min_size_bytes,
+                max_candidates=min(p.max_candidates, self.max_dir_entries),
+                include_hidden=p.include_hidden,
+                exclude_roots=(self.quarantine_dir,) if self.quarantine_dir else (),
+            )
+        except (OSError, ValueError) as exc:
+            raise PreconditionFailed(f"cannot scan {p.path}: {exc}") from exc
+        return HandlerResult(data=result, source=f"scan:{result.root}")
+
 
 __all__ = [
     "ActionNotPermitted",
@@ -297,10 +319,12 @@ def _assert_registry_matches_protocol() -> None:
     gateway cannot serve, or the gateway would serve actions nothing
     authorizes.
     """
+    from aios.actions.catalog import EXECUTOR_ACTIONS
     from aios.models.actions import PARAMS_MAP
 
     gw = OSGateway(proc_root=Path("/nonexistent-proc"))
-    drift = set(gw._handlers) ^ set(PARAMS_MAP)
+    expected = set(PARAMS_MAP) - set(EXECUTOR_ACTIONS)
+    drift = set(gw._handlers) ^ expected
     assert not drift, f"gateway/protocol drift: {sorted(drift)}"
 
 

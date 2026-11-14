@@ -26,7 +26,9 @@ def client(proc_root: Path, sys_root: Path) -> TestClient:
 def test_health(client: TestClient) -> None:
     body = client.get("/health").json()
     assert body["status"] == "ok"
-    assert body["gateway_actions"] == len(PARAMS_MAP)
+    from aios.actions.catalog import EXECUTOR_ACTIONS
+
+    assert body["gateway_actions"] == len(PARAMS_MAP) - len(EXECUTOR_ACTIONS)
 
 
 def test_schema_lists_allowed_and_forbidden(client: TestClient) -> None:
@@ -316,3 +318,35 @@ def test_read_endpoints_absent(client: TestClient) -> None:
     """filesystem.read is a gateway action, not an anonymous HTTP GET."""
     paths = {route.path for route in client.app.routes}
     assert not any("read" in p for p in paths), sorted(paths)
+
+
+@pytest.mark.parametrize(
+    "origin", ["kernel", "sysfs", "gateway", "security", "policy", "external", "tool"]
+)
+def test_agent_path_rejects_non_ai_origins(client: TestClient, origin: str) -> None:
+    response = client.post(
+        "/actions/execute",
+        json={
+            "action_id": "act-origin",
+            "type": "process.list",
+            "params": {"limit": 1},
+            "origin": origin,
+        },
+    )
+    assert response.status_code == 400
+    assert "not accepted" in response.json()["detail"]
+
+
+def test_agent_path_accepts_ai_and_user_origins(client: TestClient) -> None:
+    for origin in ("ai", "user"):
+        response = client.post(
+            "/actions/execute",
+            json={
+                "action_id": f"act-origin-{origin}",
+                "type": "process.list",
+                "params": {"limit": 1},
+                "origin": origin,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["trust_domain"] == "T3"

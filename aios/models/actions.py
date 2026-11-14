@@ -19,11 +19,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aios.actions.catalog import FORBIDDEN_ACTIONS
 from aios.models.common import DataOrigin, TrustDomain, utcnow
 from aios.models.lifecycle import ActionState
 
-#: Actions permitted in this build. Read-only by construction: there is no
-#: terminate/write/delete entry, so the model cannot emit one.
+#: Actions permitted in this build. Observation actions are executed by the
+#: read-only gateway; quarantine and restore are served by the mutation
+#: executor and always require a plan and an approval token.
 ActionType = Enum(
     "ActionType",
     {
@@ -38,41 +40,15 @@ ActionType = Enum(
         "FILESYSTEM_LIST": "filesystem.list",
         "FILESYSTEM_STAT": "filesystem.stat",
         "FILESYSTEM_READ": "filesystem.read",
+        "FILESYSTEM_CLEANUP_SCAN": "filesystem.cleanup_scan",
+        "FILESYSTEM_QUARANTINE": "filesystem.quarantine",
+        "FILESYSTEM_RESTORE": "filesystem.restore",
     },
 )
 
-#: Mutating operation names that must never appear in an AI proposal. Kept as
-#: a separate denylist so the security engine can reject them explicitly with
-#: a clear reason rather than as an anonymous "unknown type".
-FORBIDDEN_ACTION_NAMES = frozenset(
-    {
-        "process.terminate",
-        "process.kill",
-        "process.signal",
-        "filesystem.write",
-        "filesystem.delete",
-        "filesystem.rm",
-        "filesystem.mkdir",
-        "filesystem.chmod",
-        "filesystem.chown",
-        "filesystem.move",
-        "network.block",
-        "network.open",
-        "network.listen",
-        "firewall.modify",
-        "package.install",
-        "package.remove",
-        "service.start",
-        "service.stop",
-        "kernel.modify",
-        "sysctl.write",
-        "system.shutdown",
-        "system.reboot",
-        "shell.exec",
-        "command.run",
-        "exec",
-    }
-)
+#: Mutating operation names that must never appear in an AI proposal. Sourced
+#: from the action catalog so the protocol and the catalog cannot drift.
+FORBIDDEN_ACTION_NAMES = FORBIDDEN_ACTIONS
 
 
 class ActionError(ValueError):
@@ -198,6 +174,52 @@ class FilesystemReadParams(_Base):
         return v
 
 
+class FilesystemCleanupScanParams(_Base):
+    """Read-only scan for cleanup candidates under ``path``."""
+
+    path: str = Field(max_length=4096)
+    min_age_days: int = Field(default=30, ge=0, le=3650)
+    min_size_bytes: int = Field(default=0, ge=0)
+    max_candidates: int = Field(default=500, ge=1, le=5000)
+    include_hidden: bool = False
+
+    @field_validator("path")
+    @classmethod
+    def _reject_nul(cls, v: str) -> str:
+        if "\0" in v:
+            raise ValueError("path must not contain NUL")
+        if not v:
+            raise ValueError("path must not be empty")
+        return v
+
+
+class _PlanTargetParams(_Base):
+    """Common fields for a mutation step bound to an approved plan."""
+
+    path: str = Field(max_length=4096)
+    plan_id: str = Field(min_length=8, max_length=64, pattern=r"^plan-[A-Za-z0-9_-]+$")
+    candidate_id: str = Field(
+        min_length=8, max_length=64, pattern=r"^c-[A-Za-z0-9_-]+$"
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _reject_nul(cls, v: str) -> str:
+        if "\0" in v:
+            raise ValueError("path must not contain NUL")
+        if not v:
+            raise ValueError("path must not be empty")
+        return v
+
+
+class FilesystemQuarantineParams(_PlanTargetParams):
+    """Move an approved cleanup candidate into quarantine."""
+
+
+class FilesystemRestoreParams(_PlanTargetParams):
+    """Restore a quarantined candidate to its recorded original path."""
+
+
 # ---------------------------------------------------------------- envelope
 
 
@@ -217,6 +239,9 @@ PARAMS_MAP: dict[str, type[_Base]] = {
     "filesystem.list": FilesystemListParams,
     "filesystem.stat": FilesystemStatParams,
     "filesystem.read": FilesystemReadParams,
+    "filesystem.cleanup_scan": FilesystemCleanupScanParams,
+    "filesystem.quarantine": FilesystemQuarantineParams,
+    "filesystem.restore": FilesystemRestoreParams,
 }
 
 def params_model_for(action_type: str) -> type[_Base] | None:
