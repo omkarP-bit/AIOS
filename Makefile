@@ -19,6 +19,7 @@ HASH     ?=
 
 .PHONY: help all build core-build install-python test test-go test-py test-policy \
         lint fmt vet check docker-config docker-build up down logs ps health \
+        install-go \
         aios docker-aios planner planner-json shell scan quarantine restore \
         clean docker-clean
 
@@ -40,6 +41,9 @@ core-build: ## Build Go binaries
 	@mkdir -p $(BIN_DIR)
 	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aios ./cmd/aios
 	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aiosd ./cmd/aiosd
+
+install-go: ## Install the Go CLI and daemon onto PATH
+	cd $(CORE_DIR) && GOBIN="$${GOBIN:-$$HOME/.local/bin}" $(GO) install ./cmd/aios ./cmd/aiosd
 
 install-python: ## Install the Python planner in editable mode
 	$(PYTHON) -m pip install -e ".[dev]"

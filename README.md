@@ -57,7 +57,7 @@ evaluation.
 ```bash
 cd core
 go build ./...
-go install ./cmd/aios ./cmd/aiosd
+GOBIN="$HOME/.local/bin" go install ./cmd/aios ./cmd/aiosd
 
 cd ..
 python3 -m pip install -e ".[dev]"
@@ -67,6 +67,11 @@ cp .env.example .env
 `aios` is the operator CLI. `aiosd` runs the HTTP control plane in the
 foreground. The Python planner is installed as `aios-ai` or run with
 `python -m aios.ai`.
+
+Installing the Go commands needs `GOBIN` (or `$(go env GOPATH)/bin`) on
+`PATH`. When upgrading from the old Python backend, remove any leftover
+`aios` console script from the previous install; this package now only
+provides `aios-ai`.
 
 ## Containers
 
