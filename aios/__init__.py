@@ -1,8 +1,7 @@
-"""AIOS — read-only AI operating system control plane.
+"""AIOS Python planner.
 
-The AI is an untrusted decision component. It may propose structured actions;
-it can never authorize or execute them. See ``aios.security`` and
-``aios.gateway`` for the enforcement path.
+The planner is an untrusted text component: it proposes one action and posts
+it to the Go core, which owns validation, policy, and execution.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -8,16 +8,73 @@ happen after this boundary.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
 
-from aios.config import Settings
+from aios.ai.env import load_dotenv
 
 
 class ProviderError(RuntimeError):
     """Raised when a model cannot be reached or returns an unusable answer."""
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, fallback: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or fallback)
+    except ValueError:
+        return fallback
+
+
+def _env_int(name: str, fallback: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or fallback)
+    except ValueError:
+        return fallback
+
+
+@dataclass(frozen=True)
+class ProviderSettings:
+    """Model configuration read from the same AIOS_* variables as the core."""
+
+    model_provider: str = "ollama"
+    allow_external_model: bool = False
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.1-8b-instant"
+    groq_timeout_s: float = 30.0
+    groq_max_tokens: int = 1024
+    groq_temperature: float = 0.0
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen2.5:3b-instruct-q4_K_M"
+    ollama_timeout_s: float = 60.0
+
+    @classmethod
+    def from_env(cls) -> ProviderSettings:
+        load_dotenv()
+        return cls(
+            model_provider=os.environ.get("AIOS_MODEL_PROVIDER", "ollama"),
+            allow_external_model=_env_flag("AIOS_ALLOW_EXTERNAL_MODEL"),
+            groq_api_key=os.environ.get("AIOS_GROQ_API_KEY", ""),
+            groq_base_url=os.environ.get("AIOS_GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            groq_model=os.environ.get("AIOS_GROQ_MODEL", "llama-3.1-8b-instant"),
+            groq_timeout_s=_env_float("AIOS_GROQ_TIMEOUT_S", 30.0),
+            groq_max_tokens=_env_int("AIOS_GROQ_MAX_TOKENS", 1024),
+            groq_temperature=_env_float("AIOS_GROQ_TEMPERATURE", 0.0),
+            ollama_url=os.environ.get("AIOS_OLLAMA_URL", "http://127.0.0.1:11434"),
+            ollama_model=os.environ.get("AIOS_OLLAMA_MODEL", "qwen2.5:3b-instruct-q4_K_M"),
+            ollama_timeout_s=_env_float("AIOS_OLLAMA_TIMEOUT_S", 60.0),
+        )
+
+    @property
+    def groq_enabled(self) -> bool:
+        return self.allow_external_model and bool(self.groq_api_key)
 
 
 @dataclass(frozen=True)
@@ -128,8 +185,9 @@ class OllamaProvider:
         return content
 
 
-def build_provider(settings: Settings) -> ModelProvider:
+def build_provider(settings: ProviderSettings | None = None) -> ModelProvider:
     """Select the configured provider, refusing external use unless opted in."""
+    settings = settings or ProviderSettings.from_env()
     choice = settings.model_provider.strip().lower()
     if choice == "groq":
         if not settings.allow_external_model:
@@ -153,15 +211,14 @@ def build_provider(settings: Settings) -> ModelProvider:
     raise ProviderError(f"unknown model provider {settings.model_provider!r}")
 
 
-def provider_status(settings: Settings) -> dict[str, Any]:
+def provider_status(settings: ProviderSettings | None = None) -> dict[str, Any]:
     """Configuration summary that never includes the API key."""
+    settings = settings or ProviderSettings.from_env()
     return {
         "provider": settings.model_provider,
         "external": settings.model_provider == "groq",
         "external_allowed": settings.allow_external_model,
-        "configured": settings.groq_enabled
-        if settings.model_provider == "groq"
-        else True,
+        "configured": settings.groq_enabled if settings.model_provider == "groq" else True,
         "model": settings.groq_model
         if settings.model_provider == "groq"
         else settings.ollama_model,
@@ -174,6 +231,7 @@ __all__ = [
     "ModelProvider",
     "OllamaProvider",
     "ProviderError",
+    "ProviderSettings",
     "build_provider",
     "provider_status",
 ]

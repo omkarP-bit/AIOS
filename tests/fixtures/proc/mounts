@@ -1,8 +1,0 @@
-/dev/nvme0n1p2 / btrfs rw,relatime,ssd,space_cache,subvolid=5,subvol=/ rw,compress=zstd:2 0 0
-/dev/nvme0n1p2 /home btrfs rw,relatime,ssd,subvolid=257,subvol=/home rw 0 0
-tmpfs /run tmpfs rw,nosuid,nodev,size=1638404k,mode=755 0 0
-/dev/sda1 /mnt/usb\040backup ext4 rw,relatime 0 0
-proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
-sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
-tmpfs /tmp tmpfs rw,nosuid,nodev,size=8388608k 0 0
-sshfs /mnt/remote sshfs rw,relatime,user=omkar,id=0 0 0

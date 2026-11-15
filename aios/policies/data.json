@@ -1,6 +1,6 @@
 {
   "aios": {
-    "version": "0.6.0",
+    "version": "0.7.0",
     "catalog_version": "2026-11-13",
     "allowed_agents": ["local-agent"],
     "allowed_actions": {

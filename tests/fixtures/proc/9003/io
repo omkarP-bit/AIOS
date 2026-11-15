@@ -1,6 +1,0 @@
-rchar: 123456
-wchar: 654321
-syscr: 1000
-syscw: 500
-read_bytes: 4096
-write_bytes: 8192

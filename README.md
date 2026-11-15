@@ -10,74 +10,96 @@ code execution. So the agent never gets a shell. It emits a structured action
 from a closed protocol, and a security engine decides whether that action runs.
 The engine, not the model, is the trust boundary.
 
-## Status
+## Architecture
 
-The read-only control plane is complete through milestone M5, with M6
-delivered as an optional scaffold. The first mutation path — cleanup scan →
-plan → approval → quarantine → restore — is implemented, and it is
-reversible. Observation is still read-only by construction: the gateway table
-contains only observers.
+```
+Python planner (T3, untrusted)
+  provider → text → closed ActionRequest
+        │  POST /actions/validate
+        │  POST /actions/execute  (dry run by default)
+        ▼
+Go core
+  protocol → structural checks → capability → Rego/OPA
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+             read-only gateway                  quarantine executor
+             (T2 observations)                  (T1, plan + approval)
+                    │                                   │
+                    └──────────────┬────────────────────┘
+                                   ▼
+                         append-only JSONL ledger
+```
+
+The Go core owns validation, capabilities, policy evaluation, execution, and
+auditing. Python keeps only the LLM planner (`aios/ai`), which posts proposals
+over HTTP and has no policy engine, executor, approval token, or filesystem
+write path. Rego remains the only place authorization rules live.
+
+## Status
 
 | Milestone | Component | State |
 |-----------|-----------|-------|
 | M1 | Read-only observers, observation envelope, lifecycle state machine | done |
 | M2 | Action protocol, OS gateway, CLI, HTTP API | done |
-| M3 | AI runtime (Groq opt-in, optional Ollama) | done |
-| M4 | OPA/Rego policy, audit persistence, capability loading | done |
+| M3 | AI planner (Groq opt-in, optional Ollama) | done |
+| M4 | OPA/Rego policy, audit persistence, capability checks | done |
 | M5 | Prompt-injection defence suite | done |
 | M6 | eBPF observation (code + docs) | scaffold — see [docs/EBPF.md](docs/EBPF.md) |
 | M7 | Reversible cleanup: scan → plan → approve → quarantine → restore | done |
+| M8 | Go core replacing the Python backend | done |
 
-## Design documents
+## Build and install
 
-The read-only build is complete, and the first action in the mutation
-framework is implemented:
-
-- [docs/ACTIONS.md](docs/ACTIONS.md) — effect classes, plan/approval lifecycle,
-  executor contract, quarantine/restore reference action
-- [docs/OWASP.md](docs/OWASP.md) — OWASP tag scheme, control mapping, and gaps
-- [docs/EBPF.md](docs/EBPF.md) — optional observation scaffold
-
-## Install
+Requirements: Go 1.23+, Python 3.11+, and the `opa` binary for policy
+evaluation.
 
 ```bash
-pip install -e ".[dev]"
+cd core
+go build ./...
+go install ./cmd/aios ./cmd/aiosd
+
+cd ..
+python3 -m pip install -e ".[dev]"
 cp .env.example .env
-aios db init          # create the audit schema
 ```
 
-`aios db status` reports whether the audit trail is genuinely durable, and
-distinguishes "database unreachable" from "schema not created" — the second
-one looks healthy to a naive ping.
+`aios` is the operator CLI. `aiosd` runs the HTTP control plane in the
+foreground. The Python planner is installed as `aios-ai` or run with
+`python -m aios.ai`.
 
 ## The one rule
 
 ```
-The AI proposes. The Security Engine decides. Nothing else may execute.
+The AI proposes. The Go core decides. Nothing else may execute.
 ```
 
-An agent reaches the OS through exactly one route, and every step of that
-route is logged before the action runs:
+An agent reaches the OS through exactly one route:
 
 ```
 PROPOSED → VALIDATED → AUTHORIZED → EXECUTED → OBSERVED → COMPLETED
                   ↘ DENIED          ↘ DENIED
 ```
 
-A read-only command from an operator skips the engine, because the operator
-is the caller and needs no grant. Anything shaped like an agent proposal does
-not:
+An operator observation skips the engine because the operator is the caller
+and needs no grant:
 
 ```bash
-# operator observation — direct, read-only, no grant needed
+aios status
 aios cpu
 aios processes --limit 5
+aios network --listening
+```
 
-# agent path — capability check, policy check, audit trail
+Anything shaped like an agent proposal goes through the core:
+
+```bash
 echo '{"type":"process.list","params":{"limit":5}}' | aios act
 echo '{"type":"process.inspect","params":{"pid":1}}' | aios act
 #   DENY process.inspect (capability_missing) no capability grant
 ```
+
+Use `aios act --dry-run` to authorize without executing.
 
 ## What is allowed by default
 
@@ -89,8 +111,8 @@ process.list  network.connections
 ```
 
 Deliberately **not** granted: `process.inspect`, and every `filesystem`
-action. `filesystem.read` is MEDIUM risk, so it needs a human confirmation
-that this build cannot yet provide — it is refused, not silently allowed.
+action. `filesystem.read` is MEDIUM risk, so it needs a human confirmation that
+this build cannot yet provide — it is refused, not silently allowed.
 
 ## Reversible cleanup
 
@@ -111,7 +133,7 @@ Four properties keep it reversible and non-delegable:
 - The scanner chooses candidates. The model may rank or explain them; it
   cannot add a path or change a threshold.
 - Approval is an HMAC token over the plan hash, short-lived and single-use.
-  Only the CLI mints it, and it is never persisted.
+  Only the CLI mints it, and it is never persisted or sent to Python.
 - The executor re-checks `(dev, ino, size, mtime, mode, uid)` immediately
   before `renameat2(RENAME_NOREPLACE)`. A file edited after approval is
   refused, not moved.
@@ -125,7 +147,7 @@ its limits are in [docs/ACTIONS.md](docs/ACTIONS.md).
 
 ## Policy is Rego
 
-Authorization rules are not implemented in Python. They live in
+Authorization rules are not implemented in Go or Python. They live in
 `aios/policies/authz.rego`, with the action allowlist, risk table, and
 forbidden names in `aios/policies/data.json`.
 
@@ -134,64 +156,64 @@ opa test aios/policies          # policy unit tests
 opa eval -d aios/policies ...   # inspect a decision
 ```
 
-The engine only builds a normalized input document, evaluates the policy, and
-enforces the answer. `ALLOW`, `CONFIRM`, and `DENY` are all produced by the
-same rules. If OPA cannot run, the answer is `DENY` with
-`policy_unavailable` — there is no second, Python implementation to drift
-from the Rego.
+The Go engine builds a normalized input document, evaluates the policy, and
+enforces the answer. `ALLOW`, `CONFIRM`, and `DENY` all come from the same
+rules. If OPA cannot run, the answer is `DENY` with `policy_unavailable` —
+there is no second implementation to drift from the Rego.
 
-## The AI runtime
+## The AI planner
 
 The model is an untrusted text generator. It proposes; it never authorizes.
-Its output is parsed into the same closed Action Protocol a hand-written
-proposal uses, then capability-checked, policy-checked, and audited.
+The Python planner fetches the action catalog and an aggregate observation
+snapshot from the Go core, asks the provider for JSON, and posts the resulting
+proposal back to the core.
 
 ```bash
-aios provider                       # show the configured provider (never the key)
-aios ask "how is the cpu?"          # propose and authorize, do not execute
-aios ask "list 5 processes" --execute
+aiosd                              # or: aios serve
+python -m aios.ai "how is the cpu?"
+python -m aios.ai "list 5 processes" --execute
 ```
 
-A `--execute` flag is required to run an authorized proposal, so a model
-answer alone can never cause an action.
+Without `--execute` the core performs a dry run: it validates and authorizes
+but does not execute. A model answer alone can never cause an action.
 
 ### Groq is opt-in
 
 Groq is supported because the development laptop cannot hold a local model.
-External inference is **disabled by default**. Both settings are required:
+External inference is **disabled by default**. All three settings are required:
 
 ```bash
+AIOS_MODEL_PROVIDER=groq
 AIOS_ALLOW_EXTERNAL_MODEL=true
 AIOS_GROQ_API_KEY=...
-AIOS_MODEL_PROVIDER=groq
 ```
 
-Only a compact aggregate snapshot leaves the machine: hostname, kernel,
+Only a compact aggregate snapshot can leave the machine: hostname, kernel,
 CPU/memory totals, process names, and network counts. **Raw file contents are
 never sent.** The provider, model, and a SHA-256 hash of the prompt are
 recorded; the prompt itself is not. Model output stays T3 and still passes
-through OPA and the capability check.
+through capability checks and OPA in the Go core.
 
-A local provider remains available for deployments that can run one:
+A local provider remains the default:
 
 ```bash
 AIOS_MODEL_PROVIDER=ollama
 AIOS_OLLAMA_MODEL=qwen2.5:3b-instruct-q4_K_M
 ```
 
-## The two surfaces
+## The two HTTP surfaces
 
 **Operator observation** — `GET /system/*`, `/processes*`,
-`/network/connections`. These call the gateway directly. The caller is the
-local human.
+`/network/connections`. These call the read-only gateway directly. The caller
+is the local human.
 
-**Agent action** — `POST /actions/execute` and `aios act`. These go through
-the engine: protocol validation, scope consistency, capability check, policy,
-then execution.
+**Agent action** — `POST /actions/execute`. This goes through the engine:
+protocol validation, scope consistency, capability check, policy, then
+execution. `POST /actions/validate` checks the wire shape without deciding.
 
 The split is deliberate. If the read routes also required a grant, the
-operator could not look at their own machine. If the agent could reach them,
-a grant would mean nothing.
+operator could not look at their own machine. If the agent could reach them, a
+grant would mean nothing.
 
 ```bash
 aios serve
@@ -199,54 +221,8 @@ curl -s localhost:8000/actions/execute -H 'content-type: application/json' \
   -d '{"action_id":"act-demo-01","type":"process.list","params":{"limit":2}}'
 ```
 
-A denial returns 403 with the same response body shape, and
+A denial returns 403 with the same response body shape and
 `X-AIOS-Reason: capability_missing`.
-
-## Watching: `-w`
-
-Every observation command takes `-w` to re-read on an interval and redraw in
-place. Ctrl-C stops it.
-
-```bash
-aios cpu -w                  # per-core bars, frequencies, 60s history
-aios memory -w               # used / available / swap, with history
-aios processes -w            # live top processes, cpu% per process
-aios network -w             # new / changed / closed connections
-aios status -w              # uptime, process count, temperatures
-aios mounts -w              # disk usage per filesystem
-aios inspect 1234 -w        # follow one process
-```
-
-Three things that are easy to get wrong, and how they behave here:
-
-**The percentages are real deltas, not a running average.** `CpuObserver`
-computes utilisation from the difference between two `/proc/stat` reads, so
-watch mode keeps one gateway alive for the whole run. A gateway per tick would
-discard the previous sample and every frame would be a delta over a
-zero-length window.
-
-**The interval has a floor of 0.1s.** Sampling faster than that costs more in
-scheduler churn than the extra resolution is worth, and the overhead shows up
-in the numbers being reported. `aios cpu -w --interval 0.01` is refused.
-
-**Piping changes the output shape.** On a TTY the view redraws in place. When
-stdout is redirected, an in-place redraw would land in your log as escape-
-character soup, so each sample is emitted as a separate record instead:
-
-```bash
-aios cpu -w --count 60 --json | jq -r '"\(.sample) \(.data.percent.total)"'
-```
-
-`--json` requires `--count`, because an unbounded stream is unreadable in a
-terminal and never terminates in a pipe. Each line keeps the full provenance
-envelope, so a consumer can still tell where the reading came from.
-
-`aios inspect -w` stops on its own when the process exits, since following a
-process to its end is the point.
-
-Watch mode calls the same read-only handlers as the one-shot commands and
-writes nothing to the audit ledger. Watching a machine is not an authorised
-action against it.
 
 ## Trust is derived, not asserted
 
@@ -256,6 +232,7 @@ from, never from what the caller claims:
 | Domain | Source |
 |--------|--------|
 | `T0` | kernel via procfs/sysfs |
+| `T1` | trusted Go core / executor |
 | `T2` | the gateway itself |
 | `T3` | an AI proposal |
 | `T4` | external data — notably file *content*, which anyone can write |
@@ -263,59 +240,41 @@ from, never from what the caller claims:
 File content is T4 even when the AI asked for it. Anyone who can write a file
 controls its bytes.
 
-## Verification: it really reads your machine
+## Audit ledger
 
-Fixture-based tests prove the parsing is correct. They cannot prove the numbers
-come from the host, because a hardcoded value parses just as cleanly as a real
-one. So `tests/test_live.py` reads the live `/proc` and checks the observers
-against independently obtained ground truth:
-
-| Field | Source of truth |
-|-------|-----------------|
-| memory totals | `/proc/meminfo` |
-| logical cores | `nproc` |
-| load average | `/proc/loadavg` |
-| hostname, kernel, arch | `uname -n`, `-r`, `-m` |
-| process count | `ps -e` |
-| thread count | `ps -eL` |
-| sockets | `/proc/net/tcp{,6}` parsed by the test itself |
-| disk usage | `os.statvfs` |
-
-Three properties are asserted, because the first one alone is easy to fake:
-
-1. **The value matches the host.** A hardcoded figure fails on any other
-   machine, and `kernel != "Linux"` is asserted directly, because that string
-   was once returned as the kernel on every host ever built.
-2. **The value moves.** Memory available, CPU percentages, uptime, and the
-   process list are read twice and asserted to differ. A constant cannot
-   change.
-3. **A fake root produces fake numbers.** The same observer is pointed at a
-   temporary directory and must report that directory's contents. This is the
-   check that proves the values came from the filesystem rather than from the
-   function.
-
-Run just this file with `python3 -m pytest tests/test_live.py -q`.
-
-## Security model
-
-See [SECURITY.md](SECURITY.md) for the threat model, the trust boundaries,
-and what is explicitly out of scope.
+The core appends one JSON object per transition to a durable JSONL file
+(`AIOS_LEDGER_PATH`, default `~/.local/state/aios/ledger.jsonl`) and fsyncs
+each row. An empty path keeps the ledger in memory. `aios ledger` prints it;
+`/health` reports whether it is durable.
 
 ## Tests
 
 ```bash
-python3 -m pytest tests/ -q      # 396 tests
+cd core
+go test ./... -race
+go vet ./...
+
+cd ..
+python3 -m pytest tests/ -q
 python3 -m ruff check aios/ tests/
 opa test aios/policies
 ```
 
-The PostgreSQL tests skip rather than fail when no database is reachable.
+The Go suites cover the protocol, catalog parity with Rego data, capabilities,
+plan hashing and approval parity, scanner/executor round-trips, observers,
+engine outcomes, the HTTP API, and the CLI cleanup workflow. The Python suite
+covers the provider boundary, planner parsing, context construction, and the
+HTTP client against a mock core.
 
-`tests/test_injection.py` is the attack corpus. Every entry must either fail
-to parse as a proposal or be denied by the engine with a security event, so
-the measured detection rate is asserted rather than described.
+`tests/test_injection.py` is the planner's attack corpus: every entry must
+either fail to parse or remain an allowed read action. The Go engine tests
+assert that forbidden and mutation actions are denied even when the planner
+produces a well-formed request.
 
-`tests/test_live.py` is the one file that reads the real `/proc` instead of a
-fixture tree. It compares the observers against `nproc`, `uname`, `ps`, and
-`statvfs`, so if a value were hardcoded rather than read from the host, that
-file would fail. See [Verification](#verification-it-really-reads-your-machine).
+eBPF remains code and documentation only; no privileged probe is run by the
+test suite. See [docs/EBPF.md](docs/EBPF.md).
+
+## Security model
+
+See [SECURITY.md](SECURITY.md) for the threat model, the trust boundaries, and
+what is explicitly out of scope.

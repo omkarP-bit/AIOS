@@ -9,13 +9,10 @@ tooling is missing, AIOS still starts and every read-only path still works.
 | Path | Purpose |
 |---|---|
 | `scripts/ebpf/aios_trace.bt` | bpftrace probe: `execve`, `connect`, process exit, heartbeat |
-| `aios/telemetry/aios_trace.bt` | packaged copy used by `probe_status()` |
-| `aios/telemetry/ebpf.py` | availability check and JSON-line parser |
-| `tests/test_ebpf.py` | parser tests; no privileged probe is run |
 
-`probe_status()` only checks whether `bpftrace` and the script exist. It never
-spawns a process. The suggested command is returned for the operator to run
-deliberately.
+The Python telemetry wrapper and its tests were removed with the Python
+backend migration. The probe is a standalone operator tool; no package imports
+or loads it, and no test starts it.
 
 ## Requirements
 
@@ -36,29 +33,21 @@ requirements are met.
 sudo bpftrace scripts/ebpf/aios_trace.bt > /tmp/aios-ebpf.jsonl
 ```
 
-Then parse the output:
-
-```python
-from aios.telemetry import read_events
-
-for event in read_events("/tmp/aios-ebpf.jsonl"):
-    print(event.kind, event.pid, event.comm, event.detail)
-```
-
-Malformed or partial lines are skipped rather than raising. The probe writes
-one JSON object per line; `detail` may contain attacker-controlled text from
-`execve`, so it is treated as T4 data and never as an instruction.
+The probe writes one JSON object per line. `detail` may contain
+attacker-controlled text from `execve`, so it is treated as T4 data and never
+as an instruction. Malformed or partial lines should be skipped, not parsed as
+commands.
 
 ## Design constraints
 
 - **Read-only probe.** The script attaches to tracepoints and prints. It does
   not call `signal()`, `override()`, `kill()`, or write to kernel state.
-- **No privilege in the control plane.** The AIOS process runs unprivileged.
+- **No privilege in the control plane.** The AIOS core runs unprivileged.
   Starting a probe is an operator action, not something the agent can request.
-- **Unavailable is not fatal.** `probe_status()` returns
-  `{"available": false, "reason": ...}` and callers proceed without eBPF.
+- **Unavailable is not fatal.** Missing tooling removes this optional source;
+  the Go observers and every control-plane path keep working.
 - **No raw events in authorization.** Even a trusted kernel event is
-  observation. Risk and capability decisions still come from the fixed table
+  observation. Risk and capability decisions still come from the fixed catalog
   and the capability store.
 
 ## Why eBPF is not wired into the engine yet
@@ -66,5 +55,5 @@ one JSON object per line; `detail` may contain attacker-controlled text from
 Wiring it in would add a privileged data source to the authorization path
 without improving any decision the engine makes today. The current observers
 already answer the read-only questions in the protocol. eBPF becomes useful
-when the protocol grows an event-driven action, which is out of scope for a
-read-only build. Keeping it optional is the safer default.
+when the protocol grows an event-driven action, which is out of scope for the
+current build. Keeping it optional is the safer default.

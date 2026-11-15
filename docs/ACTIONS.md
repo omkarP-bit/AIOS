@@ -1,7 +1,8 @@
 # AIOS Action Framework
 
-Status: design. No mutation action is implemented yet. This document defines
-the general model that every future action — filesystem, service, package,
+Status: implemented for the first mutation path. `filesystem.cleanup_scan`,
+`filesystem.quarantine`, and `filesystem.restore` run in the Go core; this
+document defines the model every future action — filesystem, service, package,
 configuration, process, user — must follow.
 
 The read-only protocol answers "what can the agent observe?". This document
@@ -49,9 +50,10 @@ and usually `FORBIDDEN`.
 
 ## 3. Action descriptor
 
-One record per action, shared by Python, Go, and Rego. The catalog is the
+One record per action, shared by the Go core and Rego. The catalog is the
 single source of truth; the protocol enum, risk table, gateway registry, and
-policy data are generated from it or validated against it.
+policy data are generated from it or validated against it. The Python planner
+reads the same catalog from `GET /actions/schema`.
 
 ```json
 {
@@ -166,7 +168,7 @@ hash, which invalidates any existing approval.
 
 ### Plan hash
 
-`plan_hash = sha256(canonical_json(plan_body) || catalog_version || policy_bundle_hash)`.
+`plan_hash = sha256(canonical_json(plan_body) || canonical_json({"catalog_version": ...}))`.
 
 Canonical JSON means sorted keys, UTF-8, no insignificant whitespace, and
 integers for all numeric identity fields. The hash is computed by the trusted
@@ -186,22 +188,22 @@ An approval is an operator decision, not a model output.
   "expires_at": "2026-11-13T20:16:00Z",
   "nonce": "base64url-...",
   "scope_digest": "sha256:...",
-  "signature": "ed25519:..."
+  "signature": "hex-hmac-sha256"
 }
 ```
 
 Rules:
 
-- The signing key is held by the trusted core, never by the Python LLM service
-  and never by the executor process.
+- The signing key is held by the trusted core, never by the Python planner and
+  never by the model provider.
 - The token is single-use. The core marks the nonce consumed before the first
   step runs.
 - Default lifetime is 15 minutes. Expired tokens are rejected by Rego.
 - `scope_digest` binds the approval to the allowed roots and limits, so a
   token for `/home/u/.cache` cannot be replayed against `/etc`.
 - The AI never sees a token, and cannot construct a policy input that claims
-  one. `build_policy_input()` must take the token from the core's verified
-  state, not from `ActionRequest.params`.
+  one. The Go `policy.Doc` takes the token from the core's verified state,
+  not from request parameters.
 
 ## 6. Capability extension
 
@@ -367,11 +369,12 @@ a token, and it owns every side effect.
 - **No recursion by default:** recursive operations require an explicit plan
   with per-entry identity records and a higher approval class.
 - **No shell:** the executor has no `exec`, no `system`, no shell interpreter.
-- **No privilege in the core:** the core runs unprivileged. The executor runs
-  as a dedicated user with only the filesystem rights it needs, plus Landlock
-  and seccomp confinement.
-- **Crash safe:** the journal is written before the effect. On restart, an
-  `APPLYING` plan is reconciled from the journal, not re-run blindly.
+- **No privilege in the core:** the core runs unprivileged. Running the
+  executor as a dedicated user with Landlock and seccomp confinement is
+  planned.
+- **Crash safe:** writing every step to the audit ledger before the effect is
+  implemented. Automatic reconciliation of an interrupted plan at startup is
+  planned; until then restart recovery is an operator action.
 
 ## 9. First reference action: quarantine and restore
 
@@ -413,7 +416,7 @@ The scanner skips:
 ### `filesystem.quarantine` — `STAGE`, `HIGH`
 
 Moves approved candidates into
-`/var/lib/aios/quarantine/<plan_id>/<candidate_id>/payload`, with a sidecar
+`$AIOS_QUARANTINE_DIR/<plan_id>/<candidate_id>/payload`, with a sidecar
 `meta.json` containing the original path, identity, plan id, and approver.
 The quarantine root is configured per allowed root and must be on the same
 filesystem. There is no cross-device copy fallback; a cross-device candidate
@@ -427,9 +430,9 @@ the authority for the original path; the model never supplies a restore target.
 
 ### `filesystem.purge` — `DESTRUCTIVE`, `CRITICAL`
 
-Operator-only. Not reachable from the AI proposal path, even with an approval
-token. Runs after a retention period, only against quarantined objects, only
-with an explicit retention policy, and records every unlink.
+Not implemented. Intended to be operator-only, unreachable from the AI
+proposal path even with an approval token, and restricted to quarantined
+objects after a retention period.
 
 ## 10. Action families after quarantine
 
@@ -471,26 +474,34 @@ cannot be re-identified.
 
 ```text
 ┌──────────────────────┐
-│ Python LLM service   │  T3 planner. No DB credentials, no filesystem
-│ (untrusted)          │  writes, no approval tokens, no executor access.
+│ Python planner       │  T3. Provider text, closed ActionRequest, HTTP
+│ (untrusted)          │  client. No policy engine, executor, approval token,
+│                      │  filesystem write, or direct /proc access.
 └──────────┬───────────┘
-           │ plan proposal (candidate IDs, not raw paths)
+           │ POST /actions/validate, /actions/execute
 ┌──────────▼───────────┐
 │ Go core (T1)         │  protocol, capability, plan hash, approval,
-│                      │  Rego client, ledger, budget counters.
+│                      │  Rego client, engine, ledger, CLI, HTTP API.
 └──────────┬───────────┘
-           │ signed approval + immutable plan
+           │ authorized, re-validated request
 ┌──────────▼───────────┐
-│ Go executor (T2)     │  fixed catalog operations, openat2/renameat2,
-│ dedicated user       │  Landlock + seccomp, journal, rollback.
+│ Gateway / executor   │  read-only observers (T2); quarantine and restore
+│ (in-process)         │  with renameat2, identity re-check, sidecar, rollback.
 └──────────────────────┘
 
-OPA/Rego is the only policy decision point. All three components read the
-same action catalog and the same policy bundle.
+OPA/Rego is the only policy decision point. The Go catalog, Rego data, and the
+Python planner's fetched schema are kept aligned by tests and by the HTTP
+schema route.
 ```
 
-Parity tests must run the Python reference and the Go executor against the same
-plan fixtures and assert identical decisions and journal events.
+The executor currently shares the core process. Running it under a dedicated
+user with Landlock and seccomp is planned, not implemented.
+
+Parity tests pin the Go plan hash, scope digest, and approval signature against
+a Python-canonical-JSON fixture, so the two languages cannot silently disagree
+about what was approved. The Python side has no reference executor; the Go
+executor tests cover TOCTOU refusal, replay refusal, rollback, and round-trip
+restore.
 
 ## 13. Delivery phases
 
@@ -503,7 +514,9 @@ plan fixtures and assert identical decisions and journal events.
 4. **Restore and reconciliation** — `filesystem.restore`, crash recovery,
    rollback tests.
 5. **Go migration** — port the catalog, core, and executor; parity tests.
-6. **Additional families** — service, config, package, process, user.
+   Done.
+6. **Additional families** — service, config, package, process, user. Not
+   started.
 
 ## 14. Acceptance criteria
 
@@ -512,7 +525,7 @@ plan fixtures and assert identical decisions and journal events.
 - A changed inode between approval and apply aborts the step.
 - Quarantine is reversible; restore returns the object to its original parent.
 - Purge is unreachable from the AI path.
-- Every step writes `step_started` and `step_finished` audit records.
+- Every step writes an executed/completed audit pair to the ledger.
 - Budgets and per-plan limits are enforced in both the core and Rego.
 - Every descriptor has a non-empty OWASP tag list.
 - Refusal is reported as `policy_denial`, not as prompt injection, unless the

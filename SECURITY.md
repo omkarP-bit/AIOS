@@ -13,7 +13,7 @@ was wrong" becomes the blast radius of "the model read a hostile web page".
 So there is no shell. There is no `exec`. There is no way to construct a
 command string. The agent emits an action from a closed enum, and the engine
 decides whether it runs. The agent's influence over the system is bounded by
-what is written in `aios/models/actions.py` and nothing else.
+what is written in `core/internal/protocol` and nothing else.
 
 ## Trust boundaries
 
@@ -41,7 +41,7 @@ from where the data came from. A caller cannot request `T0`.
 Each layer is independently sufficient to stop a given attack, and none of
 them trusts the layer in front of it:
 
-1. **Protocol** — closed action enum, strict params, `extra="forbid"`.
+1. **Protocol** — closed action enum, strict params, strict JSON decoding.
    Unknown fields are rejected, not ignored.
 2. **Structural check** — the target named in the proposal must match the
    target in the params. A proposal claiming `/tmp/allowed` while carrying
@@ -52,8 +52,8 @@ them trusts the layer in front of it:
    action with no grant is refused; a scope that does not contain the real
    target is refused.
 5. **Policy** — OPA/Rego, deny by default. The rules live in
-   `aios/policies/authz.rego`; Python only supplies the input document and
-   parses the answer. If OPA is unavailable the decision is DENY, never a
+   `aios/policies/authz.rego`; the Go engine only supplies the input document
+   and enforces the answer. If OPA is unavailable the decision is DENY, never a
    local allow. MEDIUM and above need a human; there is no ceiling above
    which something is merely "probably fine".
 6. **Gateway** — re-validates the whitelist and re-checks readability itself.
@@ -115,13 +115,13 @@ in-memory and scoped to that run.
 
 ## Failure modes
 
-**The database is down.** Actions still run or are denied on the same terms.
-A ledger failure never becomes an allow. The failure is counted, logged, and
-reported by `/health` as `ledger_durable: false`.
+**The ledger cannot be written.** A failed append is counted and logged. It
+never becomes an allow, and an executed action is never retried because the
+audit row failed. An unwritable ledger path fails startup instead.
 
-**The ledger is in-memory.** `/health` and `aios db status` both say so. The
-audit trail does not survive a restart, and pretending otherwise would be
-worse than the outage.
+**The ledger is in-memory.** When `AIOS_LEDGER_PATH` is empty, `/health`
+reports `ledger_durable: false`. The audit trail does not survive a restart,
+and pretending otherwise would be worse than the loss.
 
 **An unexpected error in the gateway.** Caught, denied, recorded as
 `internal_error`. No retry — a retry of a half-processed action is a second
@@ -131,11 +131,11 @@ execution, not a no-op.
 never handed a half-built request.
 
 **OPA is unreachable.** The policy step returns DENY with
-`denial_reason: policy_unavailable`. There is no Python reimplementation of
-the Rego rules to fall back to: one policy, one source of truth.
+`denial_reason: policy_unavailable`. There is no second implementation of the
+Rego rules in Go or Python to fall back to: one policy, one source of truth.
 
-**The model provider is unreachable.** `aios ask` fails before any proposal
-exists. No action is submitted, so no authorization is attempted.
+**The model provider is unreachable.** `python -m aios.ai` fails before any
+proposal exists. No action is submitted, so no authorization is attempted.
 
 ## Explicitly out of scope
 
@@ -155,7 +155,8 @@ Stating this is part of the model:
   contents are never included, and the setting is off by default.
 - **eBPF is not run or validated here.** The scaffold in
   [docs/EBPF.md](docs/EBPF.md) requires `bpftrace` and root, neither of which
-  was available in the development environment.
+  was available in the development environment. The Python telemetry wrapper
+  was removed with the backend; the probe and parser design remain as docs.
 - **No confirmation UI.** MEDIUM-risk observations are refused rather than
   confirmed. Mutations use an explicit plan-hash confirmation on the CLI,
   which is the safe direction to fail.
@@ -166,8 +167,7 @@ Stating this is part of the model:
 ## Known limitations
 
 - The capability store is per-process in memory; grants do not survive a
-  restart. `PostgresLedger` can persist them and the schema is in place, but
-  nothing loads grants at startup yet.
+  restart, and nothing loads grants at startup yet.
 - `directories` listed by `filesystem.list` are T2, not T4. Directory *names*
   are influenced by whoever can create files, so a future reader should treat
   them as untrusted display strings.
