@@ -15,6 +15,11 @@ command string. The agent emits an action from a closed enum, and the engine
 decides whether it runs. The agent's influence over the system is bounded by
 what is written in `core/internal/protocol` and nothing else.
 
+The operator CLI's `aios ai` convenience launches the local planner as a
+child process. That is an operator action, not agent-controlled: the planner
+receives no shell, no approval token, and no executor access, and its output
+is still only a proposal.
+
 ## Trust boundaries
 
 ```

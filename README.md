@@ -140,6 +140,7 @@ and needs no grant:
 ```bash
 aios status
 aios cpu
+aios cpu -w           # refresh until interrupted
 aios processes --limit 5
 aios network --listening
 ```
@@ -153,6 +154,23 @@ echo '{"type":"process.inspect","params":{"pid":1}}' | aios act
 ```
 
 Use `aios act --dry-run` to authorize without executing.
+
+The local planner is one command away. It proposes, the core still decides,
+and no approval token is passed to it:
+
+```bash
+aios ai "how much memory is free?"
+aios ai "list 5 processes" --execute
+```
+
+`aios ai` runs the installed planner (`aios-ai`, then
+`python -m aios.ai`); set `AIOS_PLANNER` to override the program. The core
+must be reachable at `AIOS_API_URL` (`http://127.0.0.1:8000` by default), for
+example from `aios serve` or `make up`. Use `make planner` for the
+containerized path.
+
+`aios help`, `aios help <command>`, and `aios <command> --help` describe every
+command; `aios version` prints the CLI, protocol, and catalog versions.
 
 ## What is allowed by default
 

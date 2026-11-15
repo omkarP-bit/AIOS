@@ -124,10 +124,66 @@ func TestReorderArgsAcceptsFlagsAfterPositionals(t *testing.T) {
 	asJSON := fs.Bool("json", false, "")
 	planOut := fs.String("plan-out", "", "")
 	args := reorderArgs(fs, []string{"/tmp/root", "--json", "--plan-out", "/tmp/plan.json"})
-	if !parse(fs, args) {
-		t.Fatal("parse failed")
+	if err := parse(fs, args); err != nil {
+		t.Fatal("parse failed:", err)
 	}
 	if !*asJSON || *planOut != "/tmp/plan.json" || fs.NArg() != 1 || fs.Arg(0) != "/tmp/root" {
 		t.Fatalf("unexpected parse: json=%v plan=%q args=%v", *asJSON, *planOut, fs.Args())
+	}
+}
+
+func TestCLIActionIDsAreAccepted(t *testing.T) {
+	tests := []struct {
+		action string
+		id     string
+		params map[string]any
+	}{
+		{"system.status", idStatus, nil},
+		{"system.cpu", idCPU, nil},
+		{"system.memory", idMemory, nil},
+		{"system.hostname", idHostname, nil},
+		{"process.list", idProcess, nil},
+		{"process.inspect", idInspect, map[string]any{"pid": 1}},
+		{"network.connections", idNetwork, nil},
+		{"filesystem.list", idMounts, nil},
+		{"filesystem.list", idLS, map[string]any{"path": "/"}},
+	}
+	for _, test := range tests {
+		if _, err := protocol.NewRequest(test.action, test.params, protocol.WithActionID(test.id)); err != nil {
+			t.Errorf("%s rejected id %q: %v", test.action, test.id, err)
+		}
+	}
+}
+
+func TestObserveCommandsRun(t *testing.T) {
+	rt := cliRuntime(t, filepath.Join(t.TempDir(), "quarantine"))
+	if code, output := capture(t, func() int {
+		return cpuCommand(rt, []string{"--interval", "0", "--json"})
+	}); code != 0 {
+		t.Fatalf("cpu failed (%d): %s", code, output)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := capture(t, func() int {
+		return lsCommand(rt, []string{dir, "--json"})
+	}); code != 0 {
+		t.Fatalf("ls failed (%d): %s", code, output)
+	}
+}
+
+func TestHelpAndSuggestions(t *testing.T) {
+	code, output := capture(t, func() int { return run([]string{"help", "cpu"}) })
+	if code != 0 || !strings.Contains(output, "aios cpu") || !strings.Contains(output, "Examples") {
+		t.Fatalf("help failed (%d): %s", code, output)
+	}
+	code, output = capture(t, func() int { return run(nil) })
+	if code != 0 || !strings.Contains(output, "Observe (read-only)") {
+		t.Fatalf("bare help failed (%d): %s", code, output)
+	}
+	code, output = capture(t, func() int { return run([]string{"stauts"}) })
+	if code != 2 || !strings.Contains(output, "status") {
+		t.Fatalf("suggestion failed (%d): %s", code, output)
 	}
 }

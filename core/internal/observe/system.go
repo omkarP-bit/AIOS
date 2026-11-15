@@ -27,6 +27,9 @@ type SystemInfo struct {
 	UptimeS          *float64           `json:"uptime_s"`
 	BootTimeUTC      *string            `json:"boot_time_utc"`
 	NowUTC           string             `json:"now_utc"`
+	LoadAverage1m    *float64           `json:"load_average_1m"`
+	LoadAverage5m    *float64           `json:"load_average_5m"`
+	LoadAverage15m   *float64           `json:"load_average_15m"`
 	PidMax           *int64             `json:"pid_max"`
 	PageSize         *int64             `json:"page_size"`
 	ProcessesRunning *int64             `json:"processes_running"`
@@ -84,6 +87,7 @@ func ReadSystem(procRoot, sysRoot string, includeDisks, includeThermal bool) (Sy
 
 	info.UptimeS, _ = sysReadUptime(procRoot)
 	info.BootTimeUTC = sysBootTime(procRoot)
+	info.LoadAverage1m, info.LoadAverage5m, info.LoadAverage15m = cpuReadLoadAvg(procRoot)
 	info.ProcessesRunning, info.ThreadsTotal = sysLoadAvgCounts(procRoot)
 	info.ProcessesTotal = sysCountProcesses(procRoot)
 

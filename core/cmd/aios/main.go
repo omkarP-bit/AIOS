@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -35,9 +36,17 @@ func main() {
 func run(args []string) int {
 	if len(args) == 0 {
 		usage()
-		return 2
+		return 0
 	}
 	settings := config.Load()
+	switch args[0] {
+	case "help", "-h", "--help":
+		return helpCommand(args[1:])
+	case "version":
+		return versionCommand(args[1:])
+	case "ai", "ask":
+		return aiCommand(settings, args[1:])
+	}
 	rt, err := runtime.New(settings)
 	if err != nil {
 		fail(err)
@@ -45,13 +54,13 @@ func run(args []string) int {
 	}
 	switch args[0] {
 	case "status":
-		return observeCommand(rt, "system.status", "cli-status", nil, args[1:], printStatus)
+		return observeCommand(rt, "status", "system.status", idStatus, nil, args[1:], printStatus)
 	case "cpu":
 		return cpuCommand(rt, args[1:])
 	case "memory":
 		return memoryCommand(rt, args[1:])
 	case "hostname":
-		return observeCommand(rt, "system.hostname", "cli-hostname", nil, args[1:], printHostname)
+		return observeCommand(rt, "hostname", "system.hostname", idHostname, nil, args[1:], printHostname)
 	case "processes":
 		return processesCommand(rt, args[1:])
 	case "inspect":
@@ -59,7 +68,7 @@ func run(args []string) int {
 	case "network":
 		return networkCommand(rt, args[1:])
 	case "mounts":
-		return observeCommand(rt, "filesystem.list", "cli-mounts", map[string]any{}, args[1:], nil)
+		return observeCommand(rt, "mounts", "filesystem.list", idMounts, map[string]any{}, args[1:], printMounts)
 	case "ls":
 		return lsCommand(rt, args[1:])
 	case "schema":
@@ -74,36 +83,29 @@ func run(args []string) int {
 		return ledgerCommand(rt, args[1:])
 	case "serve":
 		return serveCommand(rt, settings, args[1:])
-	case "help", "-h", "--help":
-		usage()
-		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n", args[0])
-		usage()
+		if suggestion := suggestCommand(args[0]); suggestion != "" {
+			fmt.Fprintf(os.Stderr, "did you mean %q?\n", suggestion)
+		}
+		fmt.Fprintln(os.Stderr, "run 'aios help' to list commands")
 		return 2
 	}
 }
 
-func usage() {
-	fmt.Print(`aios — AIOS control CLI
-
-Observation (operator path, read-only):
-  status | cpu | memory | hostname | processes | inspect PID | network | mounts | ls PATH
-
-Protocol:
-  schema | validate [FILE] | act [FILE] [--dry-run]
-
-Cleanup (mutation path, exact plan hash required):
-  cleanup scan PATH [--plan-out FILE]
-  cleanup quarantine PLAN --confirm-plan-hash HASH
-  cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID]
-
-Service:
-  serve [--host H] [--port N]
-
-Every command accepts --json where it prints data.
-`)
-}
+// Action ids are stable labels for the ledger. The protocol requires 8-64
+// characters, so they must stay descriptive rather than terse.
+const (
+	idStatus   = "cli-status"
+	idCPU      = "cli-cpu-sample"
+	idMemory   = "cli-memory"
+	idHostname = "cli-hostname"
+	idProcess  = "cli-processes"
+	idInspect  = "cli-inspect"
+	idNetwork  = "cli-network"
+	idMounts   = "cli-mounts"
+	idLS       = "cli-ls-list"
+)
 
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
@@ -114,14 +116,27 @@ func fail(err error) {
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		if info, ok := commandByName(name); ok {
+			fmt.Fprintf(fs.Output(), "usage: %s\n\n%s\n\noptions:\n", info.usage, info.summary)
+		} else {
+			fmt.Fprintf(fs.Output(), "usage: aios %s [options]\n\noptions:\n", name)
+		}
+		fs.PrintDefaults()
+	}
 	return fs
 }
 
-func parse(fs *flag.FlagSet, args []string) bool {
-	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
-		return false
+func parse(fs *flag.FlagSet, args []string) error {
+	return fs.Parse(reorderArgs(fs, args))
+}
+
+// parseCode maps a flag parse failure to an exit code. -h is a success.
+func parseCode(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
 	}
-	return true
+	return 2
 }
 
 // reorderArgs moves flags ahead of positionals so "cmd PATH --json" works the
@@ -192,11 +207,11 @@ type observationResult struct {
 	Data        any             `json:"data"`
 }
 
-func observeCommand(rt *runtime.Runtime, action, actionID string, params map[string]any, args []string, human func(any)) int {
-	fs := newFlags(action)
+func observeCommand(rt *runtime.Runtime, command, action, actionID string, params map[string]any, args []string, human func(any)) int {
+	fs := newFlags(command)
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
 	started := time.Now()
 	result, err := observe(rt, action, actionID, params)
@@ -217,66 +232,134 @@ func observeCommand(rt *runtime.Runtime, action, actionID string, params map[str
 
 func printStatus(data any) {
 	fields := asMap(data)
-	fmt.Printf("hostname:   %v\n", fields["hostname"])
-	fmt.Printf("kernel:     %v\n", fields["kernel"])
-	fmt.Printf("uptime:     %vs\n", fields["uptime_s"])
-	fmt.Printf("load 1m:    %v\n", fields["load_1m"])
-	fmt.Printf("processes:  %v\n", fields["processes_total"])
-	fmt.Printf("cores:      %v\n", fields["logical_cores"])
+	fmt.Printf("hostname:    %v\n", valueOr(fields["hostname"], "-"))
+	fmt.Printf("kernel:      %v\n", valueOr(fields["kernel"], "-"))
+	fmt.Printf("uptime:      %vs\n", valueOr(fields["uptime_s"], "-"))
+	fmt.Printf("load 1/5/15: %s\n", formatLoads(fields))
+	fmt.Printf("processes:   %v\n", valueOr(fields["processes_total"], "-"))
+	fmt.Printf("cores:       %v\n", valueOr(fields["logical_cores"], "-"))
+}
+
+func formatLoads(fields map[string]any) string {
+	loads := make([]string, 0, 3)
+	missing := false
+	for _, key := range []string{"load_average_1m", "load_average_5m", "load_average_15m"} {
+		value, ok := fields[key].(float64)
+		if !ok {
+			missing = true
+			break
+		}
+		loads = append(loads, fmt.Sprintf("%.2f", value))
+	}
+	if missing {
+		return "-"
+	}
+	return strings.Join(loads, " ")
 }
 
 func printHostname(data any) {
 	fields := asMap(data)
-	fmt.Printf("%v\n", fields["hostname"])
+	fmt.Printf("%v\n", valueOr(fields["hostname"], "-"))
+}
+
+func printMounts(data any) {
+	fields := asMap(data)
+	mounts, _ := fields["mounts"].([]any)
+	fmt.Printf("%-24s %-10s %10s %10s %6s %10s\n", "MOUNT", "FS", "SIZE", "USED", "USE%", "FREE")
+	for _, row := range mounts {
+		mount, _ := row.(map[string]any)
+		percent := "-"
+		if value, ok := mount["used_percent"].(float64); ok {
+			percent = fmt.Sprintf("%.0f%%", value)
+		}
+		fmt.Printf("%-24.24v %-10v %10s %10s %6s %10s\n",
+			valueOr(mount["mount_point"], "-"), valueOr(mount["fs_type"], "-"),
+			humanBytes(int64(number(mount["total_bytes"]))),
+			humanBytes(int64(number(mount["used_bytes"]))), percent,
+			humanBytes(int64(number(mount["free_bytes"]))))
+	}
 }
 
 func cpuCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("cpu")
 	interval := fs.Float64("interval", 0.25, "sample interval in seconds")
+	watch := fs.Bool("watch", false, "refresh until interrupted")
+	fs.BoolVar(watch, "w", false, "alias for --watch")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
-	result, err := observe(rt, "system.cpu", "cli-cpu", map[string]any{"interval_s": *interval})
-	if err != nil {
-		fail(err)
-		return 1
+	for {
+		result, err := observe(rt, "system.cpu", idCPU, map[string]any{"interval_s": *interval})
+		if err != nil {
+			fail(err)
+			return 1
+		}
+		if *asJSON {
+			printJSON(result.Data)
+			return 0
+		}
+		printCPU(result.Data)
+		if !*watch {
+			return 0
+		}
+		time.Sleep(time.Second)
+		clearScreen()
 	}
-	if *asJSON {
-		printJSON(result.Data)
-		return 0
-	}
-	fields := asMap(result.Data)
+}
+
+func printCPU(data any) {
+	fields := asMap(data)
 	if percent, ok := fields["percent"].(map[string]any); ok {
 		fmt.Printf("total: %.1f%%  user: %.1f%%  system: %.1f%%  idle: %.1f%%\n",
 			number(percent["total"]), number(percent["user"]),
 			number(percent["system"]), number(percent["idle"]))
-		return 0
+		return
 	}
-	printJSON(result.Data)
-	return 0
+	printJSON(data)
 }
 
 func memoryCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("memory")
+	watch := fs.Bool("watch", false, "refresh until interrupted")
+	fs.BoolVar(watch, "w", false, "alias for --watch")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
-	result, err := observe(rt, "system.memory", "cli-memory", nil)
-	if err != nil {
-		fail(err)
-		return 1
+	for {
+		result, err := observe(rt, "system.memory", idMemory, nil)
+		if err != nil {
+			fail(err)
+			return 1
+		}
+		if *asJSON {
+			printJSON(result.Data)
+			return 0
+		}
+		printMemory(result.Data)
+		if !*watch {
+			return 0
+		}
+		time.Sleep(2 * time.Second)
+		clearScreen()
 	}
-	if *asJSON {
-		printJSON(result.Data)
-		return 0
-	}
-	fields := asMap(result.Data)
+}
+
+func printMemory(data any) {
+	fields := asMap(data)
 	fmt.Printf("used:  %.1f%%\n", number(fields["used_percent"]))
 	fmt.Printf("total: %s\n", humanBytes(int64(number(fields["total_kb"]))*1024))
 	fmt.Printf("avail: %s\n", humanBytes(int64(number(fields["available_kb"]))*1024))
-	return 0
+}
+
+// clearScreen refreshes only when writing to a terminal, so piped output keeps
+// every sample instead of erasing earlier lines.
+func clearScreen() {
+	info, err := os.Stdout.Stat()
+	if err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		fmt.Print("\033[H\033[2J")
+	}
 }
 
 func processesCommand(rt *runtime.Runtime, args []string) int {
@@ -285,14 +368,14 @@ func processesCommand(rt *runtime.Runtime, args []string) int {
 	sortBy := fs.String("sort", "cpu", "cpu, memory, pid, or name")
 	name := fs.String("name", "", "name filter")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
 	params := map[string]any{"limit": *limit, "sort_by": *sortBy}
 	if *name != "" {
 		params["name_filter"] = *name
 	}
-	result, err := observe(rt, "process.list", "cli-processes", params)
+	result, err := observe(rt, "process.list", idProcess, params)
 	if err != nil {
 		fail(err)
 		return 1
@@ -315,7 +398,10 @@ func processesCommand(rt *runtime.Runtime, args []string) int {
 func inspectCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("inspect")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() != 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios inspect PID [--json]")
 		return 2
 	}
@@ -324,7 +410,7 @@ func inspectCommand(rt *runtime.Runtime, args []string) int {
 		fail(err)
 		return 2
 	}
-	result, err := observe(rt, "process.inspect", "cli-inspect", map[string]any{"pid": pid})
+	result, err := observe(rt, "process.inspect", idInspect, map[string]any{"pid": pid})
 	if err != nil {
 		fail(err)
 		return 1
@@ -345,10 +431,10 @@ func networkCommand(rt *runtime.Runtime, args []string) int {
 	limit := fs.Int("limit", 200, "maximum connections")
 	listening := fs.Bool("listening", false, "listening sockets only")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
-	result, err := observe(rt, "network.connections", "cli-network", map[string]any{
+	result, err := observe(rt, "network.connections", idNetwork, map[string]any{
 		"limit": *limit, "listening_only": *listening, "attribute_pids": true,
 	})
 	if err != nil {
@@ -364,10 +450,10 @@ func networkCommand(rt *runtime.Runtime, args []string) int {
 	fmt.Printf("%-6s %-24s %-24s %s\n", "PROTO", "LOCAL", "REMOTE", "STATE")
 	for _, row := range rows {
 		connection, _ := row.(map[string]any)
-		fmt.Printf("%-6v %-24s %-24s %v\n", connection["family"],
+		fmt.Printf("%-6s %-24s %-24s %v\n", transport(connection["family"]),
 			address(connection["local_address"], connection["local_port"]),
 			address(connection["remote_address"], connection["remote_port"]),
-			connection["state"])
+			valueOr(connection["state"], "-"))
 	}
 	return 0
 }
@@ -377,11 +463,14 @@ func lsCommand(rt *runtime.Runtime, args []string) int {
 	all := fs.Bool("all", false, "include hidden entries")
 	max := fs.Int("max", 500, "maximum entries")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() != 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios ls PATH [--all] [--max N] [--json]")
 		return 2
 	}
-	result, err := observe(rt, "filesystem.list", "cli-ls", map[string]any{
+	result, err := observe(rt, "filesystem.list", idLS, map[string]any{
 		"path": fs.Arg(0), "show_hidden": *all, "max_entries": *max,
 	})
 	if err != nil {
@@ -394,20 +483,15 @@ func lsCommand(rt *runtime.Runtime, args []string) int {
 	}
 	fields := asMap(result.Data)
 	entries, _ := fields["entries"].([]any)
+	fmt.Printf("%-11s %10s %-19s %s\n", "MODE", "SIZE", "MODIFIED", "PATH")
 	for _, row := range entries {
 		entry, _ := row.(map[string]any)
-		kind := "-"
-		if entry["is_dir"] == true {
-			kind = "d"
-		} else if entry["is_symlink"] == true {
-			kind = "l"
+		modified := valueOr(entry["modified_utc"], "-")
+		if text, ok := modified.(string); ok && len(text) > 19 {
+			modified = text[:19]
 		}
-		mode := ""
-		if value, ok := entry["mode"].(string); ok {
-			mode = value
-		}
-		fmt.Printf("%s %-10s %10s %s\n", kind, mode,
-			humanBytes(int64(number(entry["size_bytes"]))), entry["path"])
+		fmt.Printf("%-11v %10s %-19v %v\n", valueOr(entry["mode"], "-"),
+			humanBytes(int64(number(entry["size_bytes"]))), modified, entry["path"])
 	}
 	return 0
 }
@@ -415,8 +499,8 @@ func lsCommand(rt *runtime.Runtime, args []string) int {
 func schemaCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("schema")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
 	allowed := make([]string, 0, len(catalogNames()))
 	for _, name := range catalogNames() {
@@ -428,8 +512,15 @@ func schemaCommand(rt *runtime.Runtime, args []string) int {
 		printJSON(payload)
 		return 0
 	}
+	fmt.Printf("%-26s %-10s %-7s %-9s %s\n", "ACTION", "EFFECT", "RISK", "APPROVAL", "READ-ONLY")
 	for _, name := range allowed {
-		fmt.Println(name)
+		descriptor := catalog.Catalog[name]
+		readOnly := "no"
+		if descriptor.ReadOnly {
+			readOnly = "yes"
+		}
+		fmt.Printf("%-26s %-10s %-7s %-9s %s\n", name, descriptor.Effect,
+			descriptor.Risk, descriptor.Approval, readOnly)
 	}
 	return 0
 }
@@ -437,7 +528,10 @@ func schemaCommand(rt *runtime.Runtime, args []string) int {
 func validateCommand(args []string) int {
 	fs := newFlags("validate")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() > 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() > 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios validate [FILE] [--json]")
 		return 2
 	}
@@ -472,7 +566,10 @@ func actCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("act")
 	dryRun := fs.Bool("dry-run", false, "authorize without executing")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() > 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() > 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios act [FILE] [--dry-run] [--json]")
 		return 2
 	}
@@ -507,7 +604,7 @@ func actCommand(rt *runtime.Runtime, args []string) int {
 
 func cleanupCommand(rt *runtime.Runtime, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: aios cleanup scan|quarantine|restore ...")
+		helpCommand([]string{"cleanup"})
 		return 2
 	}
 	switch args[0] {
@@ -517,8 +614,13 @@ func cleanupCommand(rt *runtime.Runtime, args []string) int {
 		return cleanupQuarantine(rt, args[1:])
 	case "restore":
 		return cleanupRestore(rt, args[1:])
+	case "help", "-h", "--help":
+		return helpCommand([]string{"cleanup"})
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown cleanup command %q\n", args[0])
+		if suggestion := suggestCommand("cleanup " + args[0]); suggestion != "" {
+			fmt.Fprintf(os.Stderr, "did you mean %q?\n", suggestion)
+		}
 		return 2
 	}
 }
@@ -531,7 +633,10 @@ func cleanupScan(rt *runtime.Runtime, args []string) int {
 	includeHidden := fs.Bool("include-hidden", false, "include dotfiles")
 	planOut := fs.String("plan-out", "", "write the plan JSON here")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() != 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios cleanup scan PATH [options]")
 		return 2
 	}
@@ -607,7 +712,10 @@ func cleanupQuarantine(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("cleanup quarantine")
 	confirm := fs.String("confirm-plan-hash", "", "exact plan hash being approved")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() != 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios cleanup quarantine PLAN --confirm-plan-hash HASH")
 		return 2
 	}
@@ -715,7 +823,10 @@ func cleanupRestore(rt *runtime.Runtime, args []string) int {
 	confirm := fs.String("confirm-plan-hash", "", "exact plan hash being approved")
 	candidate := fs.String("candidate", "", "restore only this candidate id")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) || fs.NArg() != 1 {
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
+	}
+	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: aios cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID]")
 		return 2
 	}
@@ -835,8 +946,8 @@ func ledgerCommand(rt *runtime.Runtime, args []string) int {
 	fs := newFlags("ledger")
 	action := fs.String("action", "", "only this action id")
 	asJSON := jsonMode(fs)
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
 	entries := rt.Ledger.Entries()
 	if *action != "" {
@@ -861,8 +972,8 @@ func serveCommand(rt *runtime.Runtime, settings config.Settings, args []string) 
 	fs := newFlags("serve")
 	host := fs.String("host", settings.APIHost, "bind address")
 	port := fs.Int("port", settings.APIPort, "bind port")
-	if !parse(fs, args) {
-		return 2
+	if err := parse(fs, args); err != nil {
+		return parseCode(err)
 	}
 	settings.APIHost = *host
 	settings.APIPort = *port
@@ -878,13 +989,14 @@ func serveCommand(rt *runtime.Runtime, settings config.Settings, args []string) 
 
 func readPayload(path string) ([]byte, error) {
 	if path == "" || path == "-" {
-		return readAll(os.Stdin)
+		if stdinIsTerminal() {
+			return nil, errors.New(
+				"no proposal file given and stdin is a terminal; pass a FILE or pipe JSON",
+			)
+		}
+		return io.ReadAll(os.Stdin)
 	}
 	return os.ReadFile(path)
-}
-
-func readAll(file *os.File) ([]byte, error) {
-	return io.ReadAll(file)
 }
 
 func absolutePath(path string) (string, error) {
@@ -954,6 +1066,22 @@ func address(host, port any) string {
 		return "-"
 	}
 	return fmt.Sprintf("%v:%v", host, port)
+}
+
+// transport turns a socket family such as tcp6 into its protocol label.
+func transport(family any) string {
+	value, ok := family.(string)
+	if !ok || value == "" {
+		return "-"
+	}
+	return strings.ToUpper(strings.TrimSuffix(value, "6"))
+}
+
+func valueOr(value any, fallback string) any {
+	if value == nil {
+		return fallback
+	}
+	return value
 }
 
 func stringPtr(value string) *string { return &value }
