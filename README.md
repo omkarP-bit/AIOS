@@ -68,6 +68,54 @@ cp .env.example .env
 foreground. The Python planner is installed as `aios-ai` or run with
 `python -m aios.ai`.
 
+## Containers
+
+The image bundles the Go CLI/daemon, OPA, and the Python planner. One command
+starts the core:
+
+```bash
+cp .env.example .env
+make up
+make health
+make logs
+```
+
+The compose stack keeps the unauthenticated API on host loopback
+(`127.0.0.1:8000`), persists the ledger and quarantine in the `aios-state`
+volume, and runs as an unprivileged user with all capabilities dropped.
+
+Run the planner on demand; it is not started by `up`:
+
+```bash
+make planner ARGS='"how is memory?"'
+make planner ARGS='"list 5 processes" --execute'
+make planner-json ARGS='"check cpu"'
+```
+
+The planner reaches the core as `http://core:8000`. If it uses Ollama on the
+host, the container default is `host.docker.internal:11434`; override it with
+`AIOS_OLLAMA_URL_DOCKER`. Groq remains opt-in through the same `.env`.
+
+By default the core observes the container's own PID namespace, not every host
+process. For host-wide observation, run the local binary or add `pid: host` to
+the `core` service after deciding that trade-off. To clean files under a host
+directory, uncomment the bind mount in `docker-compose.yml` and use a
+`/workspace/...` path.
+
+Make targets:
+
+```bash
+make help
+make build          # Go binaries in core/bin
+make check          # vet + lint + all tests
+make docker-config  # validate compose
+make docker-build
+make docker-aios ARGS='status --json'
+make shell
+make down
+make docker-clean   # stop and delete the state volume
+```
+
 ## The one rule
 
 ```

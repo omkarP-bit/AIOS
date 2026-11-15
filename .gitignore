@@ -19,3 +19,9 @@ htmlcov/
 *.sqlite3
 aios.pid
 .aios/
+
+# Local build and container state
+core/bin/
+state/
+workspace/
+docker-compose.override.yml
