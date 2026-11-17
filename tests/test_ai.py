@@ -435,3 +435,14 @@ def test_client_surfaces_transport_failure() -> None:
     client = ControlClient("http://core.test", transport=httpx.MockTransport(handler))
     with pytest.raises(ControlError):
         client.schema()
+
+
+def test_groq_rate_limit_hint_suggests_lowering_the_token_cap() -> None:
+    from aios.cli.errors import model_unavailable
+
+    error = model_unavailable(
+        ProviderError("groq rejected the request (429): Request too large"),
+        provider="groq",
+    )
+    assert "rate-limited" in (error.next_step or "")
+    assert "AIOS_GROQ_MAX_TOKENS" in (error.next_step or "")

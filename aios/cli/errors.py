@@ -89,11 +89,18 @@ def model_unavailable(cause: object | None = None, *, provider: str = "ollama") 
     reason = str(cause) if cause is not None else "the provider did not answer"
     label = {"groq": "Groq", "ollama": "the local model"}.get(provider, provider)
     if provider == "groq":
-        next_step = (
-            "Check `aios model`. Groq needs AIOS_MODEL_PROVIDER=groq, "
-            "AIOS_ALLOW_EXTERNAL_MODEL=true, a valid AIOS_GROQ_API_KEY, and a "
-            "model your key can use (AIOS_GROQ_MODEL)."
-        )
+        if any(marker in reason.lower() for marker in ("(429)", "rate limit", "too large", "otpm")):
+            next_step = (
+                "Groq rate-limited the request. Wait a minute and retry; lower "
+                "AIOS_GROQ_MAX_TOKENS if it persists. Run `aios model` to check "
+                "the provider."
+            )
+        else:
+            next_step = (
+                "Check `aios model`. Groq needs AIOS_MODEL_PROVIDER=groq, "
+                "AIOS_ALLOW_EXTERNAL_MODEL=true, a valid AIOS_GROQ_API_KEY, and a "
+                "model your key can use (AIOS_GROQ_MODEL)."
+            )
     elif provider == "ollama":
         next_step = (
             "Start Ollama and pull the configured model: "

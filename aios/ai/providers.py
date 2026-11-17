@@ -49,7 +49,7 @@ class ProviderSettings:
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "qwen/qwen3.8-27b"
     groq_timeout_s: float = 30.0
-    groq_max_tokens: int = 1024
+    groq_max_tokens: int = 900
     groq_temperature: float = 0.0
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5:3b-instruct-q4_K_M"
@@ -65,7 +65,7 @@ class ProviderSettings:
             groq_base_url=os.environ.get("AIOS_GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             groq_model=os.environ.get("AIOS_GROQ_MODEL", "qwen/qwen3.8-27b"),
             groq_timeout_s=_env_float("AIOS_GROQ_TIMEOUT_S", 30.0),
-            groq_max_tokens=_env_int("AIOS_GROQ_MAX_TOKENS", 1024),
+            groq_max_tokens=_env_int("AIOS_GROQ_MAX_TOKENS", 900),
             groq_temperature=_env_float("AIOS_GROQ_TEMPERATURE", 0.0),
             ollama_url=os.environ.get("AIOS_OLLAMA_URL", "http://127.0.0.1:11434"),
             ollama_model=os.environ.get("AIOS_OLLAMA_MODEL", "qwen2.5:3b-instruct-q4_K_M"),
@@ -102,7 +102,7 @@ class GroqProvider:
         model: str,
         base_url: str = "https://api.groq.com/openai/v1",
         timeout_s: float = 30.0,
-        max_tokens: int = 1024,
+        max_tokens: int = 900,
         temperature: float = 0.0,
     ) -> None:
         if not api_key:
