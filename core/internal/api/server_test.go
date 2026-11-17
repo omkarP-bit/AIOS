@@ -2,15 +2,19 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"aios/internal/actions"
 	"aios/internal/capability"
+	"aios/internal/config"
 	"aios/internal/engine"
 	"aios/internal/gateway"
 	"aios/internal/ledger"
@@ -36,7 +40,7 @@ func testServer(t *testing.T) *Server {
 func testServerWithPolicy(t *testing.T, enginePolicy policy.Engine) *Server {
 	t.Helper()
 	gw := gateway.New("/proc", "/sys", t.TempDir())
-	executor, err := actions.NewQuarantineExecutor(filepath.Join(t.TempDir(), "q"))
+	executor, err := actions.NewDispatcher(filepath.Join(t.TempDir(), "q"), "/proc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +49,10 @@ func testServerWithPolicy(t *testing.T, enginePolicy policy.Engine) *Server {
 		t.Fatal(err)
 	}
 	rt := &runtime.Runtime{
-		Gateway: gw, Executor: executor, Ledger: audit,
+		Settings: config.Settings{ProcRoot: "/proc", SysRoot: "/sys"},
+		Gateway:  gw, Executor: executor, Ledger: audit,
 		Capabilities: capability.EmptyManager(),
+		Plans:        plan.NewRegistry(time.Minute),
 	}
 	rt.Engine = engine.New(gw, executor, rt.Capabilities, enginePolicy, audit)
 	return New(rt)
@@ -109,8 +115,8 @@ func TestSchemaListsAllowedAndForbiddenActions(t *testing.T) {
 	body := decode(t, call(t, testServer(t), http.MethodGet, "/actions/schema", ""))
 	allowed, _ := body["allowed_actions"].([]any)
 	forbidden, _ := body["forbidden_actions"].([]any)
-	if len(allowed) != 14 {
-		t.Fatalf("expected 14 allowed actions, got %d", len(allowed))
+	if len(allowed) != 18 {
+		t.Fatalf("expected 18 allowed actions, got %d", len(allowed))
 	}
 	found := false
 	for _, name := range forbidden {
@@ -342,3 +348,87 @@ func TestConfirmRefusesActionsOutsideTheConfirmClass(t *testing.T) {
 }
 
 func ptr(value string) *string { return &value }
+
+func TestPlanAndApplyProcessSignal(t *testing.T) {
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+
+	server := testServer(t)
+	planBody := fmt.Sprintf(
+		`{"type":"process.signal","params":{"pid":%d,"signal":"TERM"},"intent":"test signal"}`,
+		child.Process.Pid)
+	recorder := call(t, server, http.MethodPost, "/actions/plan", planBody)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("plan status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	planned := decode(t, recorder)
+	planID, _ := planned["plan_id"].(string)
+	planHash, _ := planned["plan_hash"].(string)
+	steps, _ := planned["steps"].([]any)
+	if planID == "" || planHash == "" || len(steps) != 1 {
+		t.Fatalf("unexpected plan: %+v", planned)
+	}
+	step, _ := steps[0].(map[string]any)
+	stepID, _ := step["step_id"].(string)
+
+	applyBody := fmt.Sprintf(
+		`{"plan_id":%q,"plan_hash":%q,"step_id":%q,"type":"process.signal"}`,
+		planID, planHash, stepID)
+	applied := call(t, server, http.MethodPost, "/actions/apply", applyBody)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply status: %d body=%s", applied.Code, applied.Body.String())
+	}
+	result := decode(t, applied)
+	if result["executed"] != true {
+		t.Fatalf("signal was not executed: %+v", result)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not exit after TERM")
+	}
+
+	replay := call(t, server, http.MethodPost, "/actions/apply", applyBody)
+	if replay.Code != http.StatusConflict {
+		t.Fatalf("replayed plan was not refused: %d body=%s", replay.Code, replay.Body.String())
+	}
+}
+
+func TestPlanRefusesZombie(t *testing.T) {
+	child := exec.Command("true")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() { _, _ = child.Process.Wait() })
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child.Process.Pid))
+		if err == nil {
+			if close := strings.LastIndexByte(string(stat), ')'); close >= 0 &&
+				strings.HasPrefix(strings.TrimSpace(string(stat[close+1:])), "Z") {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	planBody := fmt.Sprintf(
+		`{"type":"process.signal","params":{"pid":%d,"signal":"KILL"}}`, child.Process.Pid)
+	recorder := call(t, testServer(t), http.MethodPost, "/actions/plan", planBody)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("zombie plan status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := decode(t, recorder)
+	if body["error"] != "zombie_not_killable" {
+		t.Fatalf("unexpected zombie refusal: %+v", body)
+	}
+}

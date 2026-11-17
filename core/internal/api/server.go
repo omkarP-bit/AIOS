@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -25,6 +26,8 @@ import (
 	"aios/internal/gateway"
 	"aios/internal/ledger"
 	"aios/internal/model"
+	"aios/internal/observe"
+	"aios/internal/plan"
 	"aios/internal/policy"
 	"aios/internal/protocol"
 	"aios/internal/runtime"
@@ -50,6 +53,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/actions/execute", s.execute)
 	mux.HandleFunc("/actions/propose", s.propose)
 	mux.HandleFunc("/actions/confirm", s.confirm)
+	mux.HandleFunc("/actions/plan", s.planAction)
+	mux.HandleFunc("/actions/apply", s.applyPlan)
 	mux.HandleFunc("/audit", s.audit)
 	mux.HandleFunc("/security/summary", s.securitySummary)
 	mux.HandleFunc("/system/status", s.systemStatus)
@@ -57,8 +62,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/system/memory", s.systemMemory)
 	mux.HandleFunc("/system/hostname", s.systemHostname)
 	mux.HandleFunc("/processes", s.processes)
+	mux.HandleFunc("/processes/diagnose", s.processDiagnose)
 	mux.HandleFunc("/processes/", s.process)
 	mux.HandleFunc("/network/connections", s.networkConnections)
+	mux.HandleFunc("/network/status", s.networkStatus)
 	return mux
 }
 
@@ -76,6 +83,11 @@ func (s *Server) ListenAndServe(settings config.Settings) error {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	services, status := s.serviceStatus()
 	durable := s.rt.Settings.LedgerPath != ""
+	networkBackend := "unavailable"
+	if s.rt.Network != nil {
+		networkBackend = "ok"
+	}
+	services["network_backend"] = networkBackend
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": status, "version": Version,
 		"proc_root":       s.rt.Settings.ProcRoot,
@@ -83,6 +95,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 		"ledger":          "jsonl", "ledger_durable": durable,
 		"ledger_detail": s.rt.Settings.LedgerPath,
 		"services":      services,
+		"deployment":    deploymentKind(),
 	})
 }
 
@@ -192,9 +205,15 @@ func (s *Server) schema(w http.ResponseWriter, _ *http.Request) {
 	for _, name := range allowed {
 		schemas[name] = schemaFor(name)
 	}
+	planActions := make([]string, 0, len(catalog.PlanActions))
+	for name := range catalog.PlanActions {
+		planActions = append(planActions, name)
+	}
+	sort.Strings(planActions)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"protocol_version": Version, "allowed_actions": allowed,
 		"forbidden_actions": forbidden, "params_schema": schemas,
+		"plan_actions": planActions,
 	})
 }
 
@@ -260,6 +279,36 @@ func (s *Server) process(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"pid": pid})
 }
 
+func (s *Server) processDiagnose(w http.ResponseWriter, r *http.Request) {
+	limit, err := intQuery(r, "limit", 200, 1, 5000)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	topN, err := intQuery(r, "top_n", 5, 0, 50)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	includeOrphans, err := boolQuery(r, "include_orphans", true)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	params := map[string]any{
+		"limit": limit, "include_orphans": includeOrphans, "top_n": topN,
+	}
+	if raw := r.URL.Query().Get("uid_filter"); raw != "" {
+		uid, err := strconv.Atoi(raw)
+		if err != nil || uid < 0 {
+			badRequest(w, errors.New("uid_filter must be a non-negative integer"))
+			return
+		}
+		params["uid_filter"] = uid
+	}
+	s.observe(w, "process.diagnose", "api-process-diagnose", params)
+}
+
 func (s *Server) networkConnections(w http.ResponseWriter, r *http.Request) {
 	limit, err := intQuery(r, "limit", 200, 1, 2000)
 	if err != nil {
@@ -278,6 +327,22 @@ func (s *Server) networkConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	s.observe(w, "network.connections", "api-network-connections", map[string]any{
 		"limit": limit, "listening_only": listening, "attribute_pids": attribute,
+	})
+}
+
+func (s *Server) networkStatus(w http.ResponseWriter, r *http.Request) {
+	wireless, err := boolQuery(r, "include_wireless", true)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	speed, err := boolQuery(r, "include_link_speed", true)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	s.observe(w, "network.status", "api-network-status", map[string]any{
+		"include_wireless": wireless, "include_link_speed": speed,
 	})
 }
 
@@ -508,8 +573,280 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	s.writeVerdict(w, request, verdict)
 }
 
-// verdictBody shapes a verdict the same way for every route, flattening the
-// observation so the CLI never needs to know the internal envelope.
+// planIntentRequest is the operator-supplied part of a plan. The core captures
+// exact target identity and assigns the plan and step ids itself.
+type planIntentRequest struct {
+	Type      string         `json:"type"`
+	Params    map[string]any `json:"params"`
+	AgentID   string         `json:"agent_id"`
+	SessionID string         `json:"session_id"`
+	Intent    *string        `json:"intent"`
+}
+
+func (s *Server) planAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method_not_allowed"})
+		return
+	}
+	var payload planIntentRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		badRequest(w, errors.New("invalid request: "+err.Error()))
+		return
+	}
+	descriptor, known := catalog.Lookup(payload.Type)
+	if !known || !catalog.PlanActions[payload.Type] || descriptor.Effect == catalog.EffectStage {
+		badRequest(w, fmt.Errorf("%s is not a generic plan action", payload.Type))
+		return
+	}
+	target, stepParams, err := protocol.ParsePlanIntent(payload.Type, payload.Params)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	agent := payload.AgentID
+	if agent == "" {
+		agent = "local-agent"
+	}
+	session := payload.SessionID
+	if session == "" {
+		session = "plan"
+	}
+	step := plan.Step{
+		StepID: "step-1", Action: payload.Type, Target: target,
+		Params: stepParams,
+	}
+	switch payload.Type {
+	case "process.signal":
+		identity, err := observe.ReadProcessIdentity(s.rt.Settings.ProcRoot, stepParams["pid"].(int))
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error": "target_missing", "detail": err.Error(),
+			})
+			return
+		}
+		if identity.PID == 1 || identity.PID == os.Getpid() {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "not_permitted", "detail": "pid 1 and the core's own pid are never signalled",
+			})
+			return
+		}
+		if identity.State == "Z" {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":  "zombie_not_killable",
+				"detail": "a zombie is already dead; its parent must reap it, not a signal",
+			})
+			return
+		}
+		if identity.UID != os.Geteuid() {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "not_permitted",
+				"detail": fmt.Sprintf("pid %d is owned by uid %d, not the core's uid %d",
+					identity.PID, identity.UID, os.Geteuid()),
+			})
+			return
+		}
+		stepParams["start_ticks"] = identity.StartTicks
+		stepParams["uid"] = identity.UID
+		stepParams["name"] = identity.Name
+		if identity.StartTimeUTC != nil {
+			stepParams["start_time_utc"] = *identity.StartTimeUTC
+		}
+	case "network.prefer":
+		if s.rt.Network == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":  "backend_unavailable",
+				"detail": "NetworkManager is not reachable on the system bus; run aiosd on the host",
+			})
+			return
+		}
+		connection, err := s.rt.Network.Resolve(target)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error": "target_missing", "detail": err.Error(),
+			})
+			return
+		}
+		step.Target = connection.UUID
+		stepParams["connection_uuid"] = connection.UUID
+		stepParams["connection_id"] = connection.ID
+		stepParams["interface"] = connection.Interface
+		stepParams["type"] = connection.Type
+		if connection.SSID != "" {
+			stepParams["ssid"] = connection.SSID
+		}
+	}
+
+	p := plan.Build(payload.Type, nil, []plan.Step{step},
+		plan.Limits{MaxItems: 1}, agent, session, payload.Intent, time.Now())
+	if err := p.Validate(); err != nil {
+		// A core-built plan that fails its own validation is an internal bug;
+		// never hand it to an operator for approval.
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "plan_invalid", "detail": err.Error(),
+		})
+		return
+	}
+	s.rt.Plans.Put(p, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan_id": p.PlanID, "plan_hash": p.PlanHash, "kind": p.Kind,
+		"action": payload.Type, "target": step.Target, "steps": p.Steps,
+		"created_at": p.CreatedAt, "expires_at": time.Now().Add(runtime.PlanTTL),
+		"requires_approval": true, "plan": p,
+	})
+}
+
+// applyRequest approves one stored plan. The plan hash is the approval: the
+// core only applies a plan it built itself, once, within its TTL.
+type applyRequest struct {
+	PlanID    string         `json:"plan_id"`
+	PlanHash  string         `json:"plan_hash"`
+	StepID    string         `json:"step_id"`
+	Type      string         `json:"type"`
+	Params    map[string]any `json:"params"`
+	AgentID   string         `json:"agent_id"`
+	SessionID string         `json:"session_id"`
+}
+
+func (s *Server) applyPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method_not_allowed"})
+		return
+	}
+	var payload applyRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		badRequest(w, errors.New("invalid request: "+err.Error()))
+		return
+	}
+	if payload.PlanID == "" || payload.PlanHash == "" || payload.StepID == "" {
+		badRequest(w, errors.New("plan_id, plan_hash, and step_id are required"))
+		return
+	}
+	p, err := s.rt.Plans.Take(payload.PlanID, payload.PlanHash, time.Now())
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "plan_unavailable", "detail": err.Error(),
+		})
+		return
+	}
+	if payload.Type != "" && payload.Type != p.Kind {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "plan_mismatch", "detail": "request type does not match the stored plan",
+		})
+		return
+	}
+	step, err := p.StepByID(payload.StepID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "plan_mismatch", "detail": err.Error(),
+		})
+		return
+	}
+	if payload.Type != "" && payload.Type != step.Action {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "plan_mismatch", "detail": "request type does not match the approved step",
+		})
+		return
+	}
+
+	params := map[string]any{}
+	for key, value := range payload.Params {
+		params[key] = value
+	}
+	params["plan_id"] = p.PlanID
+	params["step_id"] = step.StepID
+	// Bind the request to the approved identity, not whatever the caller
+	// happened to send. A different pid or connection cannot redirect it.
+	switch step.Action {
+	case "process.signal":
+		params["pid"] = step.Params["pid"]
+		if _, ok := params["signal"]; !ok {
+			params["signal"] = step.Params["signal"]
+		}
+	case "network.prefer":
+		params["connection"] = step.Target
+	}
+	agent := payload.AgentID
+	if agent == "" {
+		agent = "local-agent"
+	}
+	session := payload.SessionID
+	if session == "" {
+		session = "apply"
+	}
+	request, err := protocol.NewRequest(step.Action, params,
+		protocol.WithAgent(agent), protocol.WithSession(session),
+		protocol.WithOrigin(protocol.OriginUser), protocol.WithIntentValue(p.Intent))
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	if request.Target() != step.Target {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "plan_mismatch", "detail": "request target does not match the approved step",
+		})
+		return
+	}
+
+	manager := capability.EmptyManager()
+	for _, grant := range s.rt.Capabilities.CapabilitiesFor(agent) {
+		manager.Grant(agent, grant)
+	}
+	manager.Grant(agent, capability.Capability{
+		Action: step.Action, Scope: []string{step.Target},
+		GrantedBy: "operator-plan", Reason: "approved plan " + p.PlanID,
+	})
+	authority, err := s.rt.Authority()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "approval_unavailable", "detail": err.Error(),
+		})
+		return
+	}
+	token, err := authority.Mint(p, "operator-http", 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "approval_unavailable", "detail": err.Error(),
+		})
+		return
+	}
+	grant, err := authority.Verify(token, p, true, time.Now())
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "approval_invalid", "detail": err.Error(),
+		})
+		return
+	}
+	applyEngine := engine.New(s.rt.Gateway, s.rt.Executor, manager,
+		s.rt.Engine.Policy, s.rt.Ledger)
+	verdict := applyEngine.Process(request, &p, &grant)
+	body := s.verdictBody(request, verdict)
+	body["plan_id"] = p.PlanID
+	body["plan_hash"] = p.PlanHash
+	body["step_id"] = step.StepID
+	body["approved_by"] = grant.ApprovedBy
+	if verdict.Decision == policy.Deny {
+		reason := string(verdict.Decision)
+		if verdict.DenialReason != nil {
+			reason = string(*verdict.DenialReason)
+		}
+		w.Header().Set("X-AIOS-Reason", reason)
+		writeJSON(w, http.StatusForbidden, body)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func deploymentKind() string {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "container"
+	}
+	return "host"
+}
+
 func (s *Server) verdictBody(request *protocol.Request, verdict engine.Verdict) map[string]any {
 	encoded, err := json.Marshal(verdict)
 	if err != nil {
