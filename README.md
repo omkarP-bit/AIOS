@@ -214,6 +214,10 @@ aios model                  # provider, model, key presence, readiness
 API key. It is the first thing to check when `aios ask` or `aios chat` reports
 that the model could not answer.
 
+If the CLI reports that the core is older than the client, the daemon predates
+the routes the client calls. Rebuild and restart it with `make up`; a model
+change will not help.
+
 All views sanitize untrusted text before rendering. ANSI escapes, control
 characters, and bidi overrides are stripped, long values are truncated with
 `[truncated]`, and no untrusted string is ever interpreted as Rich markup.

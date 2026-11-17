@@ -76,6 +76,17 @@ def test_non_json_body_is_reported() -> None:
     assert "unexpected response" in caught.value.message
 
 
+def test_missing_route_means_a_stale_core() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="404 page not found")
+
+    with pytest.raises(ServiceUnavailable) as caught:
+        client_with(handler).propose(request())
+    assert caught.value.exit_code == EXIT_UNAVAILABLE
+    assert "older than this client" in caught.value.message
+    assert "make up" in (caught.value.next_step or "")
+
+
 def test_health_requires_services() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"status": "ok", "version": "0.7.0"})

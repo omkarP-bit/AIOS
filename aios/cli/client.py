@@ -19,6 +19,7 @@ from aios.cli.errors import (
     ServiceUnavailable,
     api_timeout,
     api_unreachable,
+    stale_core,
     unexpected_response,
 )
 
@@ -73,6 +74,8 @@ class CoreClient:
         try:
             body = response.json()
         except ValueError as exc:
+            if response.status_code == 404:
+                raise stale_core(path) from exc
             raise unexpected_response(path) from exc
         if not isinstance(body, dict):
             raise unexpected_response(path)

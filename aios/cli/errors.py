@@ -61,6 +61,16 @@ def api_timeout(api_url: str, timeout_s: float) -> ServiceUnavailable:
     )
 
 
+def stale_core(path: str) -> ServiceUnavailable:
+    return ServiceUnavailable(
+        f"The AIOS core does not provide {path}; it is older than this client.",
+        next_step=(
+            "Restart the current core: `make up` (or "
+            "`docker compose up -d --build core`), then retry."
+        ),
+    )
+
+
 def unexpected_response(path: str) -> ServiceUnavailable:
     return ServiceUnavailable(
         f"The AIOS core returned an unexpected response from {path}.",
@@ -109,5 +119,6 @@ __all__ = [
     "api_unreachable",
     "model_unavailable",
     "policy_unavailable",
+    "stale_core",
     "unexpected_response",
 ]
