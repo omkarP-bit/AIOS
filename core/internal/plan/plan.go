@@ -1,8 +1,10 @@
-// Package plan builds immutable cleanup plans and the hash that binds an
+// Package plan builds immutable mutation plans and the hash that binds an
 // approval to them.
 //
-// The hash is computed here, never accepted from a planner. Every field that
-// changes what will be touched is inside it, including the catalog version.
+// A plan is action-generic: cleanup, process signals, and network changes all
+// use the same hash-bound structure. The hash is computed here, never accepted
+// from a planner. Every field that changes what will be touched is inside it,
+// including the catalog version.
 package plan
 
 import (
@@ -24,18 +26,25 @@ type Limits struct {
 	MaxBytes int64 `json:"max_bytes"`
 }
 
-// Step is one quarantine operation.
+// Step is one mutation operation.
+//
+// The cleanup fields below are the original file-identity shape and remain in
+// the canonical body so existing cleanup plans keep their exact hash. Generic
+// actions use Target and Params instead; they are added to the body only when
+// set, which keeps old plans byte-identical.
 type Step struct {
-	StepID      string `json:"step_id"`
-	Action      string `json:"action"`
-	CandidateID string `json:"candidate_id"`
-	Path        string `json:"path"`
-	Dev         uint64 `json:"dev"`
-	Ino         uint64 `json:"ino"`
-	SizeBytes   int64  `json:"size_bytes"`
-	MtimeNS     int64  `json:"mtime_ns"`
-	Mode        uint32 `json:"mode"`
-	UID         uint32 `json:"uid"`
+	StepID      string         `json:"step_id"`
+	Action      string         `json:"action"`
+	CandidateID string         `json:"candidate_id"`
+	Path        string         `json:"path"`
+	Dev         uint64         `json:"dev"`
+	Ino         uint64         `json:"ino"`
+	SizeBytes   int64          `json:"size_bytes"`
+	MtimeNS     int64          `json:"mtime_ns"`
+	Mode        uint32         `json:"mode"`
+	UID         uint32         `json:"uid"`
+	Target      string         `json:"target,omitempty"`
+	Params      map[string]any `json:"params,omitempty"`
 }
 
 // RollbackStep is the inverse operation for a step.
@@ -49,6 +58,7 @@ type RollbackStep struct {
 // Plan is the immutable, hash-bound unit an operator approves.
 type Plan struct {
 	PlanID         string          `json:"plan_id"`
+	Kind           string          `json:"kind,omitempty"`
 	CatalogVersion string          `json:"catalog_version"`
 	AgentID        string          `json:"agent_id"`
 	SessionID      string          `json:"session_id"`
@@ -106,15 +116,69 @@ func FromCandidates(candidates []model.Candidate, root, agentID, sessionID strin
 	return p
 }
 
+// Build assembles an action-generic plan from already-identified steps. The
+// caller is responsible for capturing target identity; the hash binds it.
+func Build(kind string, roots []string, steps []Step, limits Limits, agentID, sessionID string, intent *string, now time.Time) Plan {
+	if limits.MaxItems < 1 {
+		limits.MaxItems = len(steps)
+	}
+	if limits.MaxBytes < 0 {
+		limits.MaxBytes = 0
+	}
+	if roots == nil {
+		roots = []string{}
+	}
+	rollback := make([]RollbackStep, 0)
+	p := Plan{
+		PlanID: NewID(), Kind: kind, CatalogVersion: catalog.CatalogVersion,
+		AgentID: agentID, SessionID: sessionID, Intent: intent,
+		CreatedAt: model.Timestamp{Time: now.UTC().Truncate(time.Microsecond)},
+		Roots:     append([]string(nil), roots...), Limits: limits,
+		Steps: steps, Rollback: rollback,
+	}
+	p.PlanHash = ComputeHash(p)
+	return p
+}
+
+// StepByID returns the approved step with this id.
+func (p Plan) StepByID(stepID string) (Step, error) {
+	for _, step := range p.Steps {
+		if step.StepID == stepID {
+			return step, nil
+		}
+	}
+	return Step{}, fmt.Errorf("%s is not part of this plan", stepID)
+}
+
+// Targets returns the non-empty generic targets in plan order.
+func (p Plan) Targets() []string {
+	out := make([]string, 0, len(p.Steps))
+	for _, step := range p.Steps {
+		if step.Target != "" {
+			out = append(out, step.Target)
+		}
+	}
+	return out
+}
+
 // body returns the canonical JSON body, excluding plan_hash.
 func (p Plan) body() map[string]any {
 	steps := make([]map[string]any, 0, len(p.Steps))
 	for _, s := range p.Steps {
-		steps = append(steps, map[string]any{
+		item := map[string]any{
 			"step_id": s.StepID, "action": s.Action, "candidate_id": s.CandidateID,
 			"path": s.Path, "dev": s.Dev, "ino": s.Ino, "size_bytes": s.SizeBytes,
 			"mtime_ns": s.MtimeNS, "mode": s.Mode, "uid": s.UID,
-		})
+		}
+		// Generic identity is included only when present so cleanup plans keep
+		// the exact canonical body they had before this layer was generalised.
+		if s.Target != "" {
+			item["target"] = s.Target
+		}
+		if len(s.Params) > 0 {
+			item["params"] = s.Params
+		}
+		steps = append(steps, item)
 	}
 	rollback := make([]map[string]any, 0, len(p.Rollback))
 	for _, r := range p.Rollback {
@@ -129,7 +193,7 @@ func (p Plan) body() map[string]any {
 	if p.Intent != nil {
 		intent = *p.Intent
 	}
-	return map[string]any{
+	body := map[string]any{
 		"plan_id":         p.PlanID,
 		"catalog_version": p.CatalogVersion,
 		"agent_id":        p.AgentID,
@@ -141,6 +205,10 @@ func (p Plan) body() map[string]any {
 		"steps":           steps,
 		"rollback":        rollback,
 	}
+	if p.Kind != "" {
+		body["kind"] = p.Kind
+	}
+	return body
 }
 
 // ComputeHash returns the sha256 of the canonical body plus the catalog
@@ -176,12 +244,10 @@ func (p Plan) Validate() error {
 	if len(p.Steps) > p.Limits.MaxItems {
 		return errors.New("plan exceeds max_items")
 	}
-	if p.TotalBytes() > p.Limits.MaxBytes {
+	if p.TotalBytes() > p.Limits.MaxBytes && p.Limits.MaxBytes > 0 {
 		return errors.New("plan exceeds max_bytes")
 	}
-	if len(p.Roots) == 0 {
-		return errors.New("plan has no approved roots")
-	}
+	needsRoots := false
 	for _, s := range p.Steps {
 		if catalog.Forbidden[s.Action] {
 			return fmt.Errorf("step %s uses forbidden action %s", s.StepID, s.Action)
@@ -189,9 +255,26 @@ func (p Plan) Validate() error {
 		if !catalog.RequiresPlan(s.Action) {
 			return fmt.Errorf("step %s is not a plan action", s.StepID)
 		}
-		if s.Path == "" {
-			return fmt.Errorf("step %s has no path", s.StepID)
+		switch catalog.ScopeDimensionFor(s.Action) {
+		case "path":
+			needsRoots = true
+			if s.Path == "" {
+				return fmt.Errorf("step %s has no path", s.StepID)
+			}
+		case "pid", "uid", "connection":
+			if s.Target == "" {
+				return fmt.Errorf("step %s has no target", s.StepID)
+			}
 		}
+		if s.Action == "process.signal" && s.Params == nil {
+			return fmt.Errorf("step %s has no process identity", s.StepID)
+		}
+		if s.Action == "network.prefer" && s.Params == nil {
+			return fmt.Errorf("step %s has no network identity", s.StepID)
+		}
+	}
+	if needsRoots && len(p.Roots) == 0 {
+		return errors.New("plan has no approved roots")
 	}
 	if p.PlanHash != ComputeHash(p) {
 		return errors.New("plan hash does not match the plan body")

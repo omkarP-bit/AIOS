@@ -98,10 +98,37 @@ var Catalog = map[string]Descriptor{
 		Scope: "pid", Approval: ApprovalNone, ReadOnly: true,
 		OWASP: []string{"OWASP-A01:2021", "OWASP-LLM01:2025"},
 	},
+	"process.diagnose": {
+		ID: "process.diagnose", Version: 1, Effect: EffectObserve, Risk: RiskLow,
+		Scope: "none", Approval: ApprovalNone, ReadOnly: true,
+		OWASP: []string{"OWASP-A01:2021", "OWASP-LLM01:2025"},
+	},
+	"process.signal": {
+		ID: "process.signal", Version: 1, Effect: EffectDestructive, Risk: RiskHigh,
+		Scope: "pid", Approval: ApprovalPlan, ReadOnly: false,
+		Limits: Limits{MaxItems: 1},
+		OWASP: []string{
+			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V4",
+		},
+	},
 	"network.connections": {
 		ID: "network.connections", Version: 1, Effect: EffectObserve, Risk: RiskLow,
 		Scope: "none", Approval: ApprovalNone, ReadOnly: true,
 		OWASP: []string{"OWASP-A01:2021"},
+	},
+	"network.status": {
+		ID: "network.status", Version: 1, Effect: EffectObserve, Risk: RiskLow,
+		Scope: "none", Approval: ApprovalNone, ReadOnly: true,
+		OWASP: []string{"OWASP-A01:2021"},
+	},
+	"network.prefer": {
+		ID: "network.prefer", Version: 1, Effect: EffectReversible, Risk: RiskHigh,
+		Scope: "connection", Approval: ApprovalPlan, ReadOnly: false,
+		Inverse: "network.prefer",
+		Limits:  Limits{MaxItems: 1},
+		OWASP: []string{
+			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021",
+		},
 	},
 	"filesystem.list": {
 		ID: "filesystem.list", Version: 1, Effect: EffectObserve, Risk: RiskLow,
@@ -148,7 +175,7 @@ var Catalog = map[string]Descriptor{
 
 // Forbidden is permanently outside every AI path.
 var Forbidden = map[string]bool{
-	"process.terminate": true, "process.kill": true, "process.signal": true,
+	"process.terminate": true, "process.kill": true,
 	"filesystem.write": true, "filesystem.delete": true, "filesystem.rm": true,
 	"filesystem.mkdir": true, "filesystem.chmod": true, "filesystem.chown": true,
 	"filesystem.move": true, "filesystem.purge": true,
@@ -163,12 +190,16 @@ var Forbidden = map[string]bool{
 var ExecutorActions = map[string]bool{
 	"filesystem.quarantine": true,
 	"filesystem.restore":    true,
+	"process.signal":        true,
+	"network.prefer":        true,
 }
 
 // PlanActions always require a plan and an operator approval.
 var PlanActions = map[string]bool{
 	"filesystem.quarantine": true,
 	"filesystem.restore":    true,
+	"process.signal":        true,
+	"network.prefer":        true,
 }
 
 // Lookup returns the descriptor for an action.

@@ -118,8 +118,17 @@ func TestCatalogSafety(t *testing.T) {
 			t.Errorf("%s has no OWASP tags", name)
 		}
 	}
-	if len(PlanActions) != 2 || !PlanActions["filesystem.quarantine"] || !PlanActions["filesystem.restore"] {
+	wantPlan := map[string]bool{
+		"filesystem.quarantine": true, "filesystem.restore": true,
+		"process.signal": true, "network.prefer": true,
+	}
+	if len(PlanActions) != len(wantPlan) {
 		t.Errorf("unexpected plan action set: %v", PlanActions)
+	}
+	for name := range wantPlan {
+		if !PlanActions[name] {
+			t.Errorf("%s is missing from the plan action set", name)
+		}
 	}
 	for name := range ExecutorActions {
 		if !PlanActions[name] {

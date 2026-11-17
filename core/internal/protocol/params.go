@@ -5,8 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
+
+// ProcessSignalIntent is the operator-supplied part of a process signal. The
+// process identity is captured by the core when it builds the plan; the
+// plan/step binding is assigned there too, never supplied here.
+type ProcessSignalIntent struct {
+	PID    int    `json:"pid"`
+	Signal string `json:"signal"`
+}
+
+// NetworkPreferIntent names the connection to prefer. It may be a UUID or an
+// exact profile id; the core resolves it and binds the plan to the UUID.
+type NetworkPreferIntent struct {
+	Connection string `json:"connection"`
+}
 
 // SystemCPUParams controls one CPU sample.
 type SystemCPUParams struct {
@@ -61,6 +76,26 @@ type ProcessInspectParams struct {
 
 func (*ProcessInspectParams) actionParams() {}
 
+// ProcessDiagnoseParams controls the read-only process diagnosis.
+type ProcessDiagnoseParams struct {
+	Limit          int  `json:"limit"`
+	UIDFilter      *int `json:"uid_filter"`
+	IncludeOrphans bool `json:"include_orphans"`
+	TopN           int  `json:"top_n"`
+}
+
+func (*ProcessDiagnoseParams) actionParams() {}
+
+// ProcessSignalParams names one approved process step.
+type ProcessSignalParams struct {
+	PID    int    `json:"pid"`
+	Signal string `json:"signal"`
+	PlanID string `json:"plan_id"`
+	StepID string `json:"step_id"`
+}
+
+func (*ProcessSignalParams) actionParams() {}
+
 // NetworkConnectionsParams controls the socket table view.
 type NetworkConnectionsParams struct {
 	Limit         int      `json:"limit"`
@@ -71,6 +106,23 @@ type NetworkConnectionsParams struct {
 }
 
 func (*NetworkConnectionsParams) actionParams() {}
+
+// NetworkStatusParams controls the interface and link view.
+type NetworkStatusParams struct {
+	IncludeWireless  bool `json:"include_wireless"`
+	IncludeLinkSpeed bool `json:"include_link_speed"`
+}
+
+func (*NetworkStatusParams) actionParams() {}
+
+// NetworkPreferParams names one approved NetworkManager connection step.
+type NetworkPreferParams struct {
+	Connection string `json:"connection"`
+	PlanID     string `json:"plan_id"`
+	StepID     string `json:"step_id"`
+}
+
+func (*NetworkPreferParams) actionParams() {}
 
 // FilesystemListParams lists a directory, or mounts when Path is nil.
 type FilesystemListParams struct {
@@ -152,8 +204,16 @@ func ParamsFor(action string) Params {
 		return &ProcessListParams{Limit: 50, SortBy: "cpu"}
 	case "process.inspect":
 		return &ProcessInspectParams{IncludeExtras: true}
+	case "process.diagnose":
+		return &ProcessDiagnoseParams{Limit: 200, IncludeOrphans: true, TopN: 5}
+	case "process.signal":
+		return &ProcessSignalParams{}
 	case "network.connections":
 		return &NetworkConnectionsParams{Limit: 200, AttributePIDs: true}
+	case "network.status":
+		return &NetworkStatusParams{IncludeWireless: true, IncludeLinkSpeed: true}
+	case "network.prefer":
+		return &NetworkPreferParams{}
 	case "filesystem.list":
 		return &FilesystemListParams{MaxEntries: 500}
 	case "filesystem.stat":
@@ -233,6 +293,40 @@ func validateParams(action string, raw map[string]json.RawMessage) (Params, map[
 		}
 		if p.PID < 1 || p.PID > 4_194_303 {
 			return nil, nil, fmt.Errorf("pid must be between 1 and 4194303")
+		}
+	case *ProcessDiagnoseParams:
+		if err := decodeStrict(raw, p, "limit", "uid_filter", "include_orphans", "top_n"); err != nil {
+			return nil, nil, err
+		}
+		if p.Limit < 1 || p.Limit > 5000 {
+			return nil, nil, fmt.Errorf("limit must be between 1 and 5000")
+		}
+		if p.TopN < 0 || p.TopN > 50 {
+			return nil, nil, fmt.Errorf("top_n must be between 0 and 50")
+		}
+		if p.UIDFilter != nil && *p.UIDFilter < 0 {
+			return nil, nil, fmt.Errorf("uid_filter must be non-negative")
+		}
+	case *ProcessSignalParams:
+		if err := decodePlanStep(raw, p); err != nil {
+			return nil, nil, err
+		}
+		if p.PID < 1 || p.PID > 4_194_303 {
+			return nil, nil, fmt.Errorf("pid must be between 1 and 4194303")
+		}
+		if !validSignal(p.Signal) {
+			return nil, nil, fmt.Errorf("signal must be one of TERM, KILL, HUP, INT, QUIT, STOP, CONT")
+		}
+	case *NetworkStatusParams:
+		if err := decodeStrict(raw, p, "include_wireless", "include_link_speed"); err != nil {
+			return nil, nil, err
+		}
+	case *NetworkPreferParams:
+		if err := decodePlanStep(raw, p); err != nil {
+			return nil, nil, err
+		}
+		if err := validateConnection(p.Connection); err != nil {
+			return nil, nil, err
 		}
 	case *NetworkConnectionsParams:
 		if err := decodeStrict(raw, p, "limit", "include_unix", "attribute_pids", "listening_only", "states"); err != nil {
@@ -338,6 +432,99 @@ func decodePlanTarget(raw map[string]json.RawMessage, out *PlanTargetParams) err
 		return fmt.Errorf("invalid candidate_id")
 	}
 	return nil
+}
+
+// decodePlanStep validates the plan/step binding shared by generic plan
+// actions. The step id names the exact approved step; it is not a free-form
+// parameter.
+func decodePlanStep(raw map[string]json.RawMessage, out any) error {
+	allowed := []string{"plan_id", "step_id"}
+	switch out.(type) {
+	case *ProcessSignalParams:
+		allowed = append(allowed, "pid", "signal")
+	case *NetworkPreferParams:
+		allowed = append(allowed, "connection")
+	}
+	if err := decodeStrict(raw, out, allowed...); err != nil {
+		return err
+	}
+	var planID, stepID string
+	switch p := out.(type) {
+	case *ProcessSignalParams:
+		planID, stepID = p.PlanID, p.StepID
+	case *NetworkPreferParams:
+		planID, stepID = p.PlanID, p.StepID
+	}
+	if !ValidPlanID(planID) {
+		return fmt.Errorf("invalid plan_id")
+	}
+	if !ValidStepID(stepID) {
+		return fmt.Errorf("invalid step_id")
+	}
+	return nil
+}
+
+var allowedSignals = map[string]bool{
+	"TERM": true, "KILL": true, "HUP": true, "INT": true,
+	"QUIT": true, "STOP": true, "CONT": true,
+}
+
+func validSignal(name string) bool { return allowedSignals[name] }
+
+// ValidSignalName reports whether a signal is inside the closed set.
+func ValidSignalName(name string) bool { return validSignal(name) }
+
+func validateConnection(value string) error {
+	if len(value) < 1 || len(value) > 128 {
+		return fmt.Errorf("connection must be between 1 and 128 characters")
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("connection must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// ParsePlanIntent validates the operator-supplied intent for a plan action and
+// returns the exact target plus the parameters the core will bind into the
+// plan. It never assigns a plan or step id: those are the core's.
+func ParsePlanIntent(action string, params map[string]any) (string, map[string]any, error) {
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return "", nil, err
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		return "", nil, err
+	}
+	switch action {
+	case "process.signal":
+		var intent ProcessSignalIntent
+		if err := decodeStrict(raw, &intent, "pid", "signal"); err != nil {
+			return "", nil, err
+		}
+		if intent.PID < 1 || intent.PID > 4_194_303 {
+			return "", nil, fmt.Errorf("pid must be between 1 and 4194303")
+		}
+		if !validSignal(intent.Signal) {
+			return "", nil, fmt.Errorf("signal must be one of TERM, KILL, HUP, INT, QUIT, STOP, CONT")
+		}
+		return strconv.Itoa(intent.PID), map[string]any{
+			"pid": intent.PID, "signal": intent.Signal,
+		}, nil
+	case "network.prefer":
+		var intent NetworkPreferIntent
+		if err := decodeStrict(raw, &intent, "connection"); err != nil {
+			return "", nil, err
+		}
+		if err := validateConnection(intent.Connection); err != nil {
+			return "", nil, err
+		}
+		return intent.Connection, map[string]any{"connection": intent.Connection}, nil
+	default:
+		return "", nil, fmt.Errorf("%s does not take a plan intent", action)
+	}
 }
 
 func decodeStrict(raw map[string]json.RawMessage, out any, allowed ...string) error {

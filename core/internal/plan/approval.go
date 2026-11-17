@@ -98,12 +98,18 @@ func (t Token) payload() map[string]any {
 func scopeDigest(p Plan) (string, error) {
 	roots := make([]string, len(p.Roots))
 	copy(roots, p.Roots)
-	body, err := canonical.Marshal(map[string]any{
+	doc := map[string]any{
 		"roots": roots,
 		"limits": map[string]any{
 			"max_items": p.Limits.MaxItems, "max_bytes": p.Limits.MaxBytes,
 		},
-	})
+	}
+	// Generic plans bind their exact target list into the approval too. An
+	// empty list is omitted so cleanup approvals keep their original digest.
+	if targets := p.Targets(); len(targets) > 0 {
+		doc["targets"] = targets
+	}
+	body, err := canonical.Marshal(doc)
 	if err != nil {
 		return "", err
 	}

@@ -148,8 +148,15 @@ func (r *Request) Target() string {
 			return p.Path
 		}
 	case "pid":
-		if p, ok := r.Typed.(*ProcessInspectParams); ok {
+		switch p := r.Typed.(type) {
+		case *ProcessInspectParams:
 			return fmt.Sprintf("%d", p.PID)
+		case *ProcessSignalParams:
+			return fmt.Sprintf("%d", p.PID)
+		}
+	case "connection":
+		if p, ok := r.Typed.(*NetworkPreferParams); ok {
+			return p.Connection
 		}
 	}
 	return ""
@@ -187,6 +194,7 @@ var (
 	sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	planIDRe    = regexp.MustCompile(`^plan-[A-Za-z0-9_-]+$`)
 	candidateRe = regexp.MustCompile(`^c-[A-Za-z0-9_-]+$`)
+	stepIDRe    = regexp.MustCompile(`^step-[A-Za-z0-9_-]+$`)
 )
 
 // FromWire validates and builds a Request. Missing action_id is generated, as
@@ -359,6 +367,11 @@ func (r *Request) CheckScopeConsistency() error {
 			if target == "" || fmt.Sprint(value) != target {
 				return fmt.Errorf("requested_scope.pid does not match the action target")
 			}
+		case "connection":
+			text, ok := value.(string)
+			if !ok || target == "" || text != target {
+				return fmt.Errorf("requested_scope.connection does not match the action target")
+			}
 		case "uid":
 			// uid is not used by any current action; accepted but inert.
 		default:
@@ -412,6 +425,11 @@ func ValidPlanID(id string) bool {
 // ValidCandidateID reports whether a candidate id has the expected shape.
 func ValidCandidateID(id string) bool {
 	return len(id) >= 8 && len(id) <= 64 && candidateRe.MatchString(id)
+}
+
+// ValidStepID reports whether a plan step id has the expected shape.
+func ValidStepID(id string) bool {
+	return len(id) >= 6 && len(id) <= 64 && stepIDRe.MatchString(id)
 }
 
 // ValidPath rejects empty strings, NUL, and over-long paths.
