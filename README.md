@@ -48,6 +48,7 @@ write path. Rego remains the only place authorization rules live.
 | M6 | eBPF observation (code + docs) | scaffold — see [docs/EBPF.md](docs/EBPF.md) |
 | M7 | Reversible cleanup: scan → plan → approve → quarantine → restore | done |
 | M8 | Go core replacing the Python backend | done |
+| M9 | Host-run core: plan-approved process signals and network preference | done |
 
 ## Build and install
 
@@ -115,6 +116,47 @@ process. For host-wide observation, run the local binary or add `pid: host` to
 the `core` service after deciding that trade-off. To clean files under a host
 directory, uncomment the bind mount in `docker-compose.yml` and use a
 `/workspace/...` path.
+
+## Host core: processes and networking
+
+A container cannot see host processes or control host networking, and it must
+not receive that privilege. Process diagnosis/signalling and network switching
+therefore run through a core started on the host:
+
+```bash
+make host-serve                    # foreground, 127.0.0.1:8000
+make host-install-service          # or a systemd user unit
+curl -s localhost:8000/health | jq .deployment   # "host"
+```
+
+Process and network mutations are plan actions. The AI may propose them; the
+core captures exact identity and builds the hash-bound plan; the operator sees
+every step and applies that exact hash.
+
+```bash
+# Read-only diagnosis, safe for the AI or the operator
+aios diagnose
+
+# Signal one process: the core records PID, start ticks, UID, and name
+aios plan process.signal --pid 4242 --signal TERM
+aios apply plan-... --plan-hash sha256:... --step-id step-1
+
+# Prefer an existing NetworkManager profile by exact id or UUID
+aios plan network.prefer --connection "Home Wi-Fi"
+aios apply plan-... --plan-hash sha256:... --step-id step-1
+```
+
+The same flow is available in chat: the AI proposes, the CLI prints the plan
+and hash, and only an explicit `y` sends `/actions/apply`. In a non-interactive
+turn the plan is printed but never applied.
+
+Two limits are deliberate:
+
+- A zombie is already dead. `process.signal` refuses it with
+  `zombie_not_killable`; the parent must reap it or be restarted.
+- Signals are same-UID only, never PID 1, and never the core itself. Network
+  activation goes through NetworkManager's system D-Bus, never `nmcli` or a
+  shell, and polkit may still require an interactive authorization.
 
 Make targets:
 
@@ -280,8 +322,12 @@ The `local-agent` can observe the system and nothing else:
 
 ```
 system.cpu  system.memory  system.hostname  system.status  system.uptime
-process.list  network.connections
+process.list  process.diagnose  network.connections  network.status
 ```
+
+`process.signal` and `network.prefer` are plan actions: they are never
+granted by default and only run after the operator approves an exact
+core-built plan hash.
 
 Deliberately **not** granted: `process.inspect`, and every `filesystem`
 action. `filesystem.read` is MEDIUM risk with an `approval: confirm` class, so

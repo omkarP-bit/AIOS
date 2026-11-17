@@ -19,7 +19,8 @@ HASH     ?=
 
 .PHONY: help all build core-build install-python test test-go test-py test-policy \
         lint fmt vet check docker-config docker-build up down logs ps health \
-        install-go cli \
+        install-go cli host-serve host-install-service host-uninstall-service \
+        plan apply \
         aios docker-aios planner planner-json shell scan quarantine restore \
         clean docker-clean
 
@@ -29,6 +30,9 @@ help: ## Show this help
 		$(MAKEFILE_LIST)
 	@printf "\nExamples:\n"
 	@printf "  make up\n"
+	@printf "  make host-serve\n"
+	@printf "  make plan ARGS='process.signal --pid 4242 --signal TERM'\n"
+	@printf "  make apply ARGS='plan-... --plan-hash sha256:... --step-id step-1'\n"
 	@printf "  make planner ARGS='how is memory?'\n"
 	@printf "  make scan TARGET=~/Downloads PLAN=plan.json\n"
 	@printf "  make quarantine PLAN=plan.json HASH=sha256:...\n\n"
@@ -95,6 +99,29 @@ ps: ## Show container status
 health: ## Query the core health endpoint on the host
 	curl -fsS http://127.0.0.1:$(API_PORT)/health
 	@printf "\n"
+
+host-serve: core-build ## Run aiosd on the host (needed for process/network actions)
+	@printf "Running the host core on 127.0.0.1:%s. Ctrl+C stops it.\n" "$(API_PORT)"
+	AIOS_API_HOST=127.0.0.1 AIOS_API_PORT=$(API_PORT) $(AIOSD)
+
+host-install-service: core-build ## Install and start aiosd as a systemd user service
+	@mkdir -p "$$HOME/.config/systemd/user"
+	@sed -e 's|@AIOS_DIR@|$(CURDIR)|g' -e 's|@AIOS_BIN@|$(abspath $(AIOSD))|g' \
+		scripts/aiosd.service.in > "$$HOME/.config/systemd/user/aiosd.service"
+	systemctl --user daemon-reload
+	systemctl --user enable --now aiosd.service
+	@printf "Installed. Logs: journalctl --user -u aiosd -f\n"
+
+host-uninstall-service: ## Stop and remove the systemd user service
+	-systemctl --user disable --now aiosd.service
+	-rm -f "$$HOME/.config/systemd/user/aiosd.service"
+	systemctl --user daemon-reload
+
+plan: ## Build a plan, e.g. make plan ARGS='process.signal --pid 42'
+	$(PYTHON) -m aios.cli plan $(ARGS)
+
+apply: ## Apply an approved plan, e.g. make apply ARGS='plan-x --plan-hash sha256:...'
+	$(PYTHON) -m aios.cli apply $(ARGS)
 
 aios: ## Run the Go core CLI (mutations), e.g. make aios ARGS='status'
 	$(AIOS) $(ARGS)

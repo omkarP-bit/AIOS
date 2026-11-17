@@ -174,6 +174,72 @@ Canonical JSON means sorted keys, UTF-8, no insignificant whitespace, and
 integers for all numeric identity fields. The hash is computed by the trusted
 core, never accepted from the planner.
 
+### Generic plan actions
+
+Cleanup keeps its file-identity fields (`path`, `dev`, `ino`, `size_bytes`,
+`mtime_ns`, `mode`, `uid`). Process and network plans use the same hash-bound
+structure with `target` and `params`; those fields are added to the canonical
+body only when present, so existing cleanup hashes do not change.
+
+```json
+{
+  "kind": "process.signal",
+  "plan_id": "plan-...",
+  "catalog_version": "2026-11-13",
+  "steps": [
+    {
+      "step_id": "step-1",
+      "action": "process.signal",
+      "target": "4242",
+      "params": {
+        "pid": 4242,
+        "signal": "TERM",
+        "start_ticks": 918273,
+        "uid": 1000,
+        "name": "sleep"
+      }
+    }
+  ],
+  "limits": {"max_items": 1, "max_bytes": 0},
+  "rollback": []
+}
+```
+
+`network.prefer` replaces the process identity with `connection_uuid`,
+`connection_id`, `interface`, `type`, and `ssid`, and targets the exact UUID.
+An id that resolves ambiguously is refused; a plan never guesses.
+
+The HTTP flow is core-built-only:
+
+```text
+POST /actions/plan   {type, params, intent}
+                     -> exact target identity captured by the core,
+                        plan stored for 10 minutes, hash returned
+POST /actions/apply  {plan_id, plan_hash, step_id}
+                     -> stored plan consumed once, exact-target capability,
+                        short-lived grant, executor re-check, ledger row
+```
+
+A caller cannot POST a plan body and ask the core to trust its hash. Approval
+is the exact hash; the core compares it with the plan it built and stored.
+The one exception is the cleanup CLI, which still accepts a plan file because
+that flow predates the registry and carries the same hash check.
+
+Target identity is re-checked immediately before the effect:
+
+- `process.signal` verifies PID, start ticks, UID, and name; refuses PID 1,
+  the core itself, zombies, and any process owned by another UID.
+- `network.prefer` re-resolves the UUID and compares interface/type before
+  asking NetworkManager's system D-Bus to activate it. It never runs `nmcli`
+  or a shell.
+
+A zombie has no live identity. It is refused with `zombie_not_killable`; only
+its parent can reap it. The plan route refuses to build that plan at all.
+
+Both families need a host-run core. A container cannot see host processes or
+control host networking, and dropping all capabilities is deliberate. The
+read-only views (`process.diagnose`, `network.status`) work in either place.
+
 ## 5. Approval tokens
 
 An approval is an operator decision, not a model output.
@@ -515,8 +581,8 @@ restore.
    rollback tests.
 5. **Go migration** — port the catalog, core, and executor; parity tests.
    Done.
-6. **Additional families** — service, config, package, process, user. Not
-   started.
+6. **Additional families** — process and network plan actions are implemented.
+   Service, config, package, and user families are not started.
 
 ## 14. Acceptance criteria
 
