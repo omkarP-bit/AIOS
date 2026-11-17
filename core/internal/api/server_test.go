@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,7 +26,14 @@ func (allowAll) Evaluate(*protocol.Request, *capability.Check, *plan.Plan, *plan
 	return policy.Result{Decision: policy.Allow, Reason: "test", Risk: "LOW", Source: "test"}
 }
 
+func (allowAll) Healthy() error { return nil }
+
 func testServer(t *testing.T) *Server {
+	t.Helper()
+	return testServerWithPolicy(t, allowAll{})
+}
+
+func testServerWithPolicy(t *testing.T, enginePolicy policy.Engine) *Server {
 	t.Helper()
 	gw := gateway.New("/proc", "/sys", t.TempDir())
 	executor, err := actions.NewQuarantineExecutor(filepath.Join(t.TempDir(), "q"))
@@ -40,8 +48,28 @@ func testServer(t *testing.T) *Server {
 		Gateway: gw, Executor: executor, Ledger: audit,
 		Capabilities: capability.EmptyManager(),
 	}
-	rt.Engine = engine.New(gw, executor, rt.Capabilities, allowAll{}, audit)
+	rt.Engine = engine.New(gw, executor, rt.Capabilities, enginePolicy, audit)
 	return New(rt)
+}
+
+// confirmPolicy is a small stand-in for Rego: a capability view yields
+// CONFIRM, and only an explicit operator confirmation yields ALLOW.
+type confirmPolicy struct{}
+
+func (confirmPolicy) Evaluate(req *protocol.Request, check *capability.Check, _ *plan.Plan, _ *plan.Grant) policy.Result {
+	if req.OperatorConfirmed {
+		return policy.Result{
+			Decision: policy.Allow, Reason: "operator confirmed", Risk: "MEDIUM", Source: "test",
+		}
+	}
+	if check != nil && check.Allowed {
+		return policy.Result{
+			Decision: policy.Confirm, Reason: "confirmation required", Risk: "MEDIUM", Source: "test",
+		}
+	}
+	return policy.Result{
+		Decision: policy.Deny, Reason: "no capability", Risk: "MEDIUM", Source: "test",
+	}
 }
 
 func call(t *testing.T, s *Server, method, target, body string) *httptest.ResponseRecorder {
@@ -180,3 +208,134 @@ func TestObservationRoutesAreOperatorDirect(t *testing.T) {
 		t.Fatalf("invalid pid accepted: %d", recorder.Code)
 	}
 }
+
+func TestHealthReportsServiceStatus(t *testing.T) {
+	body := decode(t, call(t, testServer(t), http.MethodGet, "/health", ""))
+	services, ok := body["services"].(map[string]any)
+	if !ok {
+		t.Fatalf("services missing: %+v", body)
+	}
+	for _, name := range []string{"api", "engine", "opa", "ledger"} {
+		if _, ok := services[name]; !ok {
+			t.Fatalf("service %q missing: %+v", name, services)
+		}
+	}
+}
+
+func TestAuditIsNewestFirstAndFiltersDenied(t *testing.T) {
+	server := testServer(t)
+	rows := []ledger.Entry{
+		{ActionID: "act-one", Action: "system.hostname", State: "COMPLETED", Risk: "LOW", Decision: "ALLOW"},
+		{ActionID: "act-two", Action: "filesystem.read", State: "DENIED", Risk: "MEDIUM", Decision: "DENY",
+			DenialReason: ptr("confirmation_required")},
+	}
+	for _, row := range rows {
+		if err := server.rt.Ledger.Record(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := decode(t, call(t, server, http.MethodGet, "/audit", ""))
+	entries, _ := body["entries"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %+v", len(entries), body)
+	}
+	first, _ := entries[0].(map[string]any)
+	if first["action_id"] != "act-two" {
+		t.Fatalf("audit is not newest first: %+v", entries)
+	}
+	denied := decode(t, call(t, server, http.MethodGet, "/audit?denied=true", ""))
+	deniedEntries, _ := denied["entries"].([]any)
+	if len(deniedEntries) != 1 {
+		t.Fatalf("denied filter returned %d rows", len(deniedEntries))
+	}
+}
+
+func TestSecuritySummaryCountsAndLastEvents(t *testing.T) {
+	server := testServer(t)
+	for _, row := range []ledger.Entry{
+		{ActionID: "act-one", State: "COMPLETED", Risk: "LOW", Decision: "ALLOW"},
+		{ActionID: "act-two", State: "DENIED", Risk: "HIGH", Decision: "DENY"},
+		{ActionID: "act-three", State: "VALIDATED", Risk: "MEDIUM", Decision: "CONFIRM"},
+	} {
+		if err := server.rt.Ledger.Record(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := decode(t, call(t, server, http.MethodGet, "/security/summary", ""))
+	counts, _ := body["counts"].(map[string]any)
+	if counts["total"] != float64(3) || counts["denied"] != float64(1) || counts["confirmed"] != float64(1) {
+		t.Fatalf("unexpected counts: %+v", counts)
+	}
+	events, _ := body["last_events"].([]any)
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+}
+
+func TestProposeReturnsConfirmWithoutExecuting(t *testing.T) {
+	server := testServerWithPolicy(t, confirmPolicy{})
+	path := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := call(t, server, http.MethodPost, "/actions/propose",
+		`{"type":"filesystem.read","params":{"path":"`+path+`"},"intent":"look"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := decode(t, recorder)
+	if body["decision"] != "CONFIRM" || body["requires_confirmation"] != true {
+		t.Fatalf("unexpected propose body: %+v", body)
+	}
+	if body["denial_reason"] != "confirmation_required" {
+		t.Fatalf("unexpected denial reason: %+v", body)
+	}
+	if body["target"] != path {
+		t.Fatalf("target missing or wrong: %+v", body["target"])
+	}
+	if body["data"] != nil || body["executed"] == true {
+		t.Fatalf("propose executed the read: %+v", body)
+	}
+	states := server.rt.Ledger.States(body["action_id"].(string))
+	if len(states) != 1 || states[0] != "VALIDATED" {
+		t.Fatalf("unexpected audit states: %+v", states)
+	}
+}
+
+func TestConfirmExecutesOneApprovedRead(t *testing.T) {
+	server := testServerWithPolicy(t, confirmPolicy{})
+	path := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := call(t, server, http.MethodPost, "/actions/confirm",
+		`{"type":"filesystem.read","params":{"path":"`+path+`"},"origin":"ai"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := decode(t, recorder)
+	if body["decision"] != "ALLOW" || body["executed"] != true {
+		t.Fatalf("unexpected confirm body: %+v", body)
+	}
+	data, _ := body["data"].(map[string]any)
+	if data["content"] != "hello" {
+		t.Fatalf("read content missing: %+v", data)
+	}
+	if body["trust_domain"] != "T3" {
+		t.Fatalf("operator confirmation should be user origin: %+v", body["trust_domain"])
+	}
+}
+
+func TestConfirmRefusesActionsOutsideTheConfirmClass(t *testing.T) {
+	recorder := call(t, testServer(t), http.MethodPost, "/actions/confirm",
+		`{"type":"system.hostname","params":{}}`)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := decode(t, recorder)
+	if body["error"] != "not_confirmable" {
+		t.Fatalf("unexpected body: %+v", body)
+	}
+}
+
+func ptr(value string) *string { return &value }
