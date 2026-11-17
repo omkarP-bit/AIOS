@@ -12,6 +12,9 @@ license = { text = "MIT" }
 
 dependencies = [
     "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +24,7 @@ dev = [
 ]
 
 [project.scripts]
+aios = "aios.cli.__main__:main"
 aios-ai = "aios.ai.__main__:main"
 
 [tool.setuptools.packages.find]
