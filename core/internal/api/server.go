@@ -867,6 +867,15 @@ func (s *Server) verdictBody(request *protocol.Request, verdict engine.Verdict) 
 		// Report both so the CLI never presents untrusted data as trusted.
 		body["data_trust"] = observation["trust_domain"]
 	}
+	// A mutation reports through the executor result rather than an
+	// observation. Flatten it the same way so the CLI has one shape.
+	if executed, ok := body["result"].(map[string]any); ok {
+		if data, present := executed["data"]; present && data != nil {
+			body["data"] = data
+		}
+		body["source"] = executed["source"]
+		body["data_trust"] = executed["trust_domain"]
+	}
 	if capability, ok := body["capability"].(map[string]any); ok {
 		body["capability"] = capability["matched_capability"]
 	}

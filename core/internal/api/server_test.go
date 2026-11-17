@@ -388,6 +388,10 @@ func TestPlanAndApplyProcessSignal(t *testing.T) {
 	if result["executed"] != true {
 		t.Fatalf("signal was not executed: %+v", result)
 	}
+	data, _ := result["data"].(map[string]any)
+	if data["status"] != "signal_sent" || data["signal"] != "TERM" {
+		t.Fatalf("executor result was not flattened: %+v", result)
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- child.Wait() }()
