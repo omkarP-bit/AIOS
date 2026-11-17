@@ -29,6 +29,15 @@ from aios.cli.ui.render import (
 )
 
 
+def data_trust(verdict: dict[str, Any]) -> object:
+    """Trust of the returned data, falling back for older cores.
+
+    A confirmed action runs with the operator's trust, but its output keeps the
+    trust of where it came from: file bytes stay untrusted.
+    """
+    return verdict.get("data_trust") or verdict.get("trust_domain")
+
+
 @dataclass
 class TurnResult:
     question: str
@@ -195,7 +204,7 @@ class Assistant:
                 render_result(
                     data,
                     source=verdict.get("source"),
-                    trust_domain=verdict.get("trust_domain"),
+                    trust_domain=data_trust(verdict),
                 )
             )
             result.blocks.append("result")

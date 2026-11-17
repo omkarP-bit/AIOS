@@ -412,7 +412,11 @@ from, never from what the caller claims:
 | `T4` | external data — notably file *content*, which anyone can write |
 
 File content is T4 even when the AI asked for it. Anyone who can write a file
-controls its bytes.
+controls its bytes. A verdict therefore reports two fields: `trust_domain` is
+the trust the action ran under (for an operator-confirmed read, T3), and
+`data_trust` is the trust of what it returned (T4 for file content). The CLI
+labels the Result card with `data_trust`, so an approved action cannot make
+untrusted bytes look trusted.
 
 ## Audit ledger
 

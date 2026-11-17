@@ -214,7 +214,7 @@ def test_confirm_not_approved_does_not_execute(runner, fake_client, provider, mo
     assert all(call[0] != "confirm" for call in fake_client.calls)
 
 
-def test_confirm_approved_executes_once(runner, fake_client, provider, monkeypatch) -> None:
+def test_confirm_approved_executes_once(fake_client, provider, monkeypatch, capsys) -> None:
     import aios.cli.assistant as assistant_module
     from aios.cli.state import get_state
 
@@ -243,6 +243,7 @@ def test_confirm_approved_executes_once(runner, fake_client, provider, monkeypat
         "target": "/tmp/note.txt",
         "data": {"path": "/tmp/note.txt", "content": "hello"},
         "trust_domain": "T3",
+        "data_trust": "T4",
         "source": "external",
     }
     monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: True))
@@ -253,6 +254,10 @@ def test_confirm_approved_executes_once(runner, fake_client, provider, monkeypat
     assert result.confirmed is True
     assert [call[0] for call in fake_client.calls].count("confirm") == 1
     assert result.answer == "The file says hello."
+    # The request ran as the operator (T3), but the bytes are untrusted (T4).
+    rendered = capsys.readouterr().out
+    assert "T4 UNTRUSTED" in rendered
+    assert "trust T3" not in rendered
 
 
 def test_ask_json_has_no_ansi(runner, fake_client, provider) -> None:
