@@ -525,6 +525,10 @@ func (s *Server) verdictBody(request *protocol.Request, verdict engine.Verdict) 
 	if observation, ok := body["observation"].(map[string]any); ok {
 		body["source"] = observation["source"]
 		body["data"] = observation["data"]
+		// The requested action runs under the operator's trust (T3), but the
+		// bytes it returns carry the trust of where they came from (often T4).
+		// Report both so the CLI never presents untrusted data as trusted.
+		body["data_trust"] = observation["trust_domain"]
 	}
 	if capability, ok := body["capability"].(map[string]any); ok {
 		body["capability"] = capability["matched_capability"]

@@ -324,6 +324,9 @@ func TestConfirmExecutesOneApprovedRead(t *testing.T) {
 	if body["trust_domain"] != "T3" {
 		t.Fatalf("operator confirmation should be user origin: %+v", body["trust_domain"])
 	}
+	if body["data_trust"] != "T4" {
+		t.Fatalf("file content should be reported as untrusted data: %+v", body["data_trust"])
+	}
 }
 
 func TestConfirmRefusesActionsOutsideTheConfirmClass(t *testing.T) {
