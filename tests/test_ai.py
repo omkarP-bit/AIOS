@@ -518,3 +518,44 @@ def test_snapshot_survives_the_cli_client_error_type() -> None:
     assert "diagnosis" not in snapshot
     assert "default_interface" not in snapshot["network"]
     assert snapshot["host"]["hostname"] == "aios-fixture"
+
+
+def test_snapshot_names_every_missing_section() -> None:
+    from aios.cli.errors import CliError
+
+    class Partial(FakeClient):
+        def observe(self, action, params=None):
+            if action in {"system.cpu", "process.diagnose", "network.status"}:
+                raise CliError(f"{action} is not available on this core")
+            return super().observe(action, params)
+
+    snapshot = build_snapshot(Partial())
+    missing = {row["action"] for row in snapshot["missing"]}
+    assert missing == {"system.cpu", "process.diagnose", "network.status"}
+    assert snapshot["host"]["hostname"] == "aios-fixture"
+    assert snapshot["network"]["total"] == 2
+
+
+def test_snapshot_treats_an_old_endpoint_as_missing_not_fatal() -> None:
+    from aios.cli.errors import stale_core
+
+    class Stale(FakeClient):
+        def observe(self, action, params=None):
+            if action == "network.status":
+                raise stale_core("/network/status")
+            return super().observe(action, params)
+
+    snapshot = build_snapshot(Stale())
+    assert "default_interface" not in snapshot["network"]
+    assert [row["action"] for row in snapshot["missing"]] == ["network.status"]
+
+
+def test_snapshot_still_fails_when_the_core_is_unreachable() -> None:
+    from aios.cli.errors import ServiceUnavailable
+
+    class Down(FakeClient):
+        def observe(self, action, params=None):
+            raise ServiceUnavailable("Cannot reach the AIOS core")
+
+    with pytest.raises(ServiceUnavailable):
+        build_snapshot(Down())

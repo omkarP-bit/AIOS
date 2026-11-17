@@ -3,6 +3,11 @@
 Only aggregate observation is shared. File contents are never included: the
 file-content action is attacker-controlled and deliberately outside this
 builder's reach.
+
+``system.status`` is required because it identifies the host and proves the
+core answers at all. Every other section is best-effort: a core that is older
+than this client simply omits it, and the omission is named in ``missing`` so
+the model does not present a partial picture as complete.
 """
 
 from __future__ import annotations
@@ -20,17 +25,24 @@ CONTEXT_NOTICE = (
 )
 
 
-def _optional_observe(client: Any, action: str, params: dict[str, Any]) -> Any:
-    """Read an optional section, treating "core cannot answer" as absent.
+def _optional_observe(
+    client: Any,
+    action: str,
+    params: dict[str, Any],
+    missing: list[dict[str, str]],
+) -> Any:
+    """Read an optional section, recording why it is absent.
 
     Two clients use this builder: ``ControlClient`` raises ``ControlError`` and
-    the CLI's ``CoreClient`` raises ``CliError``/``ServiceUnavailable``. Both
-    mean the same thing here: this core is older than the snapshot, so the
-    extra section is omitted instead of failing the whole ask.
+    the CLI's ``CoreClient`` raises ``CliError``/``ServiceUnavailable``. A
+    section that a given core cannot answer must not fail the whole ask.
+    An unreachable core is different: the required ``system.status`` call
+    fails before this helper runs, so it is reported as unreachable there.
     """
     try:
         return client.observe(action, params)
-    except (ControlError, CliError):
+    except (ControlError, CliError) as exc:
+        missing.append({"action": action, "reason": str(exc)[:160]})
         return None
 
 
@@ -56,10 +68,22 @@ def build_snapshot(
     include_network: bool = True,
     include_diagnosis: bool = True,
 ) -> dict[str, Any]:
+    # Required: this is the only call allowed to fail the whole snapshot.
     status = client.observe("system.status")
-    cpu = client.observe("system.cpu", {"interval_s": 0.0})
-    memory = client.observe("system.memory", {"include_fields": False})
-    processes = client.observe("process.list", {"limit": process_limit, "sort_by": "cpu"})
+    if not isinstance(status, dict):
+        status = {}
+    missing: list[dict[str, str]] = []
+
+    # 0.25s is the documented default and is accepted by every core version;
+    # 0.0 is not understood by older cores.
+    cpu = _optional_observe(client, "system.cpu", {"interval_s": 0.25}, missing) or {}
+    memory = _optional_observe(client, "system.memory", {"include_fields": False}, missing) or {}
+    processes = (
+        _optional_observe(
+            client, "process.list", {"limit": process_limit, "sort_by": "cpu"}, missing
+        )
+        or {}
+    )
 
     snapshot: dict[str, Any] = {
         "notice": CONTEXT_NOTICE,
@@ -87,7 +111,7 @@ def build_snapshot(
                 "cpu_percent": p.get("cpu_percent"),
                 "rss_bytes": p.get("rss_bytes"),
             }
-            for p in processes.get("processes", [])[:process_limit]
+            for p in (processes.get("processes") or [])[:process_limit]
         ],
     }
 
@@ -96,6 +120,7 @@ def build_snapshot(
             client,
             "process.diagnose",
             {"limit": 200, "include_orphans": True, "top_n": 3},
+            missing,
         )
         if isinstance(diagnosis, dict):
             zombies = diagnosis.get("zombies") or []
@@ -111,23 +136,31 @@ def build_snapshot(
             }
 
     if include_network:
-        network = client.observe("network.connections", {"limit": 200, "attribute_pids": False})
-        summary = network.get("summary", {})
-        snapshot["network"] = {
-            "total": summary.get("total"),
-            "by_state": summary.get("by_state"),
-            "by_transport": summary.get("by_transport"),
-        }
+        network = _optional_observe(
+            client,
+            "network.connections",
+            {"limit": 200, "attribute_pids": False},
+            missing,
+        )
+        if isinstance(network, dict):
+            summary = network.get("summary") or {}
+            snapshot["network"] = {
+                "total": summary.get("total"),
+                "by_state": summary.get("by_state"),
+                "by_transport": summary.get("by_transport"),
+            }
         link = _optional_observe(
             client,
             "network.status",
             {"include_wireless": True, "include_link_speed": True},
+            missing,
         )
         if isinstance(link, dict):
+            network_section = snapshot.setdefault("network", {})
             interfaces = link.get("interfaces") or []
-            snapshot["network"]["default_interface"] = link.get("default_interface")
-            snapshot["network"]["default_gateway"] = link.get("default_gateway")
-            snapshot["network"]["interfaces"] = [
+            network_section["default_interface"] = link.get("default_interface")
+            network_section["default_gateway"] = link.get("default_gateway")
+            network_section["interfaces"] = [
                 {
                     "name": row.get("name"),
                     "oper_state": row.get("oper_state"),
@@ -139,6 +172,11 @@ def build_snapshot(
                 for row in interfaces[:8]
                 if isinstance(row, dict) and row.get("name") != "lo"
             ]
+
+    if missing:
+        # Naming the gaps stops the model from treating a partial snapshot as
+        # the whole machine.
+        snapshot["missing"] = missing
 
     snapshot["untrusted_annotations"] = annotation(
         {
