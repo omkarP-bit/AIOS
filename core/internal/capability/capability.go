@@ -65,6 +65,7 @@ func DefaultCapabilities() []Capability {
 		{Action: "process.diagnose", Reason: "process visibility", GrantedBy: "capability-manager"},
 		{Action: "network.connections", Reason: "network visibility", GrantedBy: "capability-manager"},
 		{Action: "network.status", Reason: "network visibility", GrantedBy: "capability-manager"},
+		{Action: "filesystem.usage", Reason: "disk capacity visibility", GrantedBy: "capability-manager"},
 	}
 }
 

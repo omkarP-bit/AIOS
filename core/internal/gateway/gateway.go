@@ -220,6 +220,17 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 		}
 		return envelope("sysfs:"+g.SysRoot+"/class/net", "gateway", "T2", name, result), nil
 
+	case "filesystem.usage":
+		p, ok := req.Typed.(*protocol.FilesystemUsageParams)
+		if !ok {
+			return nil, fail("invalid filesystem usage params")
+		}
+		data, err := observe.ReadFilesystemUsage(g.ProcRoot, p.IncludePseudo)
+		if err != nil {
+			return nil, fail("cannot read mounts: %v", err)
+		}
+		return envelope("procfs:"+g.ProcRoot+"/mounts", "gateway", "T2", name, data), nil
+
 	case "filesystem.list":
 		p, ok := req.Typed.(*protocol.FilesystemListParams)
 		if !ok {

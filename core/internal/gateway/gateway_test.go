@@ -37,7 +37,7 @@ func TestGatewayIsAReadOnlyWhitelist(t *testing.T) {
 			t.Fatalf("%s must not be reachable through the gateway", action)
 		}
 	}
-	if !gw.Supports("process.list") || !gw.Supports("filesystem.cleanup_scan") {
+	if !gw.Supports("process.list") || !gw.Supports("filesystem.cleanup_scan") || !gw.Supports("filesystem.usage") {
 		t.Fatal("read-only actions missing from the gateway")
 	}
 }

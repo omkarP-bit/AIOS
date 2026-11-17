@@ -124,6 +124,14 @@ type NetworkPreferParams struct {
 
 func (*NetworkPreferParams) actionParams() {}
 
+// FilesystemUsageParams controls the mount capacity view. It takes no target:
+// the observation covers every mounted filesystem on the host.
+type FilesystemUsageParams struct {
+	IncludePseudo bool `json:"include_pseudo"`
+}
+
+func (*FilesystemUsageParams) actionParams() {}
+
 // FilesystemListParams lists a directory, or mounts when Path is nil.
 type FilesystemListParams struct {
 	Path          *string `json:"path"`
@@ -216,6 +224,8 @@ func ParamsFor(action string) Params {
 		return &NetworkPreferParams{}
 	case "filesystem.list":
 		return &FilesystemListParams{MaxEntries: 500}
+	case "filesystem.usage":
+		return &FilesystemUsageParams{}
 	case "filesystem.stat":
 		return &FilesystemStatParams{}
 	case "filesystem.read":
@@ -347,6 +357,10 @@ func validateParams(action string, raw map[string]json.RawMessage) (Params, map[
 			}
 		}
 		p.States = deduped
+	case *FilesystemUsageParams:
+		if err := decodeStrict(raw, p, "include_pseudo"); err != nil {
+			return nil, nil, err
+		}
 	case *FilesystemListParams:
 		if err := decodeStrict(raw, p, "path", "include_pseudo", "max_entries", "show_hidden"); err != nil {
 			return nil, nil, err

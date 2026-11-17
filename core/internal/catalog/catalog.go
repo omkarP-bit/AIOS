@@ -145,6 +145,11 @@ var Catalog = map[string]Descriptor{
 		Scope: "path", Approval: ApprovalConfirm, ReadOnly: true, PathAction: true,
 		OWASP: []string{"OWASP-LLM01:2025", "OWASP-LLM02:2025", "OWASP-ASVS4-V12"},
 	},
+	"filesystem.usage": {
+		ID: "filesystem.usage", Version: 1, Effect: EffectObserve, Risk: RiskLow,
+		Scope: "none", Approval: ApprovalNone, ReadOnly: true,
+		OWASP: []string{"OWASP-A01:2021", "OWASP-ASVS4-V12"},
+	},
 	"filesystem.cleanup_scan": {
 		ID: "filesystem.cleanup_scan", Version: 1, Effect: EffectObserve, Risk: RiskLow,
 		Scope: "path", Approval: ApprovalNone, ReadOnly: true, PathAction: true,

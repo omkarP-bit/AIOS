@@ -184,6 +184,27 @@ func ListMounts(procRoot string, includePseudo bool) (FilesystemList, error) {
 	return FilesystemList{Mounts: mounts, Total: len(mounts)}, nil
 }
 
+// ReadFilesystemUsage reports capacity for every mounted filesystem. With
+// includePseudo false, only real filesystems are included. It shares the
+// parser with ListMounts so both views agree byte-for-byte.
+//
+// Bind mounts of single files (/etc/hosts, a container's entrypoint) are
+// capacity-identical to the filesystem that holds them, so they are dropped:
+// reporting them as separate filesystems would mislead a disk-space answer.
+func ReadFilesystemUsage(procRoot string, includePseudo bool) (FilesystemList, error) {
+	list, err := ListMounts(procRoot, includePseudo)
+	if err != nil {
+		return list, err
+	}
+	kept := make([]FilesystemEntry, 0, len(list.Mounts))
+	for _, mount := range list.Mounts {
+		if info, statErr := os.Stat(mount.MountPoint); statErr == nil && info.IsDir() {
+			kept = append(kept, mount)
+		}
+	}
+	return FilesystemList{Mounts: kept, Total: len(kept)}, nil
+}
+
 // StatPath stats a path, following symlinks (stat semantics, not lstat).
 func StatPath(path string) PathMetadata {
 	info, err := os.Stat(path)

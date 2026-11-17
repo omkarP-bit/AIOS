@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/processes/", s.process)
 	mux.HandleFunc("/network/connections", s.networkConnections)
 	mux.HandleFunc("/network/status", s.networkStatus)
+	mux.HandleFunc("/filesystem/usage", s.filesystemUsage)
 	return mux
 }
 
@@ -343,6 +344,17 @@ func (s *Server) networkStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.observe(w, "network.status", "api-network-status", map[string]any{
 		"include_wireless": wireless, "include_link_speed": speed,
+	})
+}
+
+func (s *Server) filesystemUsage(w http.ResponseWriter, r *http.Request) {
+	pseudo, err := boolQuery(r, "include_pseudo", false)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	s.observe(w, "filesystem.usage", "api-filesystem-usage", map[string]any{
+		"include_pseudo": pseudo,
 	})
 }
 

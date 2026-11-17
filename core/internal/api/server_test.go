@@ -115,8 +115,8 @@ func TestSchemaListsAllowedAndForbiddenActions(t *testing.T) {
 	body := decode(t, call(t, testServer(t), http.MethodGet, "/actions/schema", ""))
 	allowed, _ := body["allowed_actions"].([]any)
 	forbidden, _ := body["forbidden_actions"].([]any)
-	if len(allowed) != 18 {
-		t.Fatalf("expected 18 allowed actions, got %d", len(allowed))
+	if len(allowed) != 19 {
+		t.Fatalf("expected 19 allowed actions, got %d", len(allowed))
 	}
 	found := false
 	for _, name := range forbidden {
@@ -212,6 +212,40 @@ func TestObservationRoutesAreOperatorDirect(t *testing.T) {
 	}
 	if recorder := call(t, server, http.MethodGet, "/processes/notapid", ""); recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid pid accepted: %d", recorder.Code)
+	}
+}
+
+func TestFilesystemUsageReportsMountCapacity(t *testing.T) {
+	recorder := call(t, testServer(t), http.MethodGet, "/filesystem/usage", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status: %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := decode(t, recorder)
+	data, ok := body["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected body: %+v", body)
+	}
+	mounts, ok := data["mounts"].([]any)
+	if !ok || len(mounts) == 0 {
+		t.Fatalf("mounts missing: %+v", data)
+	}
+	foundRoot := false
+	for _, raw := range mounts {
+		mount, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if mount["mount_point"] == "/" {
+			foundRoot = true
+			for _, key := range []string{"total_bytes", "used_bytes", "free_bytes", "used_percent"} {
+				if mount[key] == nil {
+					t.Fatalf("/ mount is missing %s: %+v", key, mount)
+				}
+			}
+		}
+	}
+	if !foundRoot {
+		t.Fatalf("root filesystem not reported: %+v", mounts)
 	}
 }
 

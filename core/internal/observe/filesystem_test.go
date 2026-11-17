@@ -327,3 +327,38 @@ func TestFilesystemLiveSmoke(t *testing.T) {
 		t.Fatal("live bounded read returned nothing")
 	}
 }
+
+func TestReadFilesystemUsageMatchesListMounts(t *testing.T) {
+	root := t.TempDir()
+	mountPoint := filepath.Join(root, "data")
+	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fileMount := filepath.Join(root, "hosts")
+	fsTestWrite(t, fileMount, []byte("127.0.0.1 localhost\n"))
+	fsTestWrite(t, filepath.Join(root, "mounts"), []byte(
+		"/dev/sda1 "+mountPoint+" ext4 rw 0 0\n"+
+			"/dev/sda1 "+fileMount+" ext4 rw 0 0\n"+
+			"proc /proc proc rw 0 0\n"))
+
+	usage, err := ReadFilesystemUsage(root, false)
+	if err != nil {
+		t.Fatalf("read usage: %v", err)
+	}
+	list, err := ListMounts(root, false)
+	if err != nil {
+		t.Fatalf("list mounts: %v", err)
+	}
+	if list.Total != 2 {
+		t.Fatalf("list mounts total = %d", list.Total)
+	}
+	if usage.Total != 1 {
+		t.Fatalf("file bind mounts must be dropped: %+v", usage)
+	}
+	if usage.Mounts[0].MountPoint != mountPoint {
+		t.Fatalf("mount point = %q", usage.Mounts[0].MountPoint)
+	}
+	if usage.Mounts[0].TotalBytes == nil || usage.Mounts[0].UsedPercent == nil {
+		t.Fatalf("capacity missing: %+v", usage.Mounts[0])
+	}
+}

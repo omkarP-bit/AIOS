@@ -16,6 +16,7 @@
       "network.connections": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
       "network.status": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
       "network.prefer": {"risk": "HIGH", "read_only": false, "path_action": false, "effect": "REVERSIBLE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021"]},
+      "filesystem.usage": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
       "filesystem.list": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
       "filesystem.stat": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
       "filesystem.read": {"risk": "MEDIUM", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "confirm", "owasp": ["OWASP-LLM01:2025", "OWASP-LLM02:2025", "OWASP-ASVS4-V12"]},
