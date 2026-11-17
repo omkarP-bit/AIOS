@@ -393,6 +393,20 @@ class FakeClient:
                     }
                 ],
             }
+        if action == "filesystem.usage":
+            return {
+                "total": 1,
+                "mounts": [
+                    {
+                        "mount_point": "/",
+                        "fs_type": "ext4",
+                        "total_bytes": 1000,
+                        "used_bytes": 400,
+                        "free_bytes": 600,
+                        "used_percent": 40.0,
+                    }
+                ],
+            }
         raise AssertionError(action)
 
 
@@ -421,6 +435,14 @@ def test_snapshot_includes_diagnosis_and_link_speed() -> None:
     assert "parent must reap" in diagnosis["zombies"][0]["recommendation"]
     assert snapshot["network"]["default_gateway"] == "192.168.1.1"
     assert snapshot["network"]["interfaces"][0]["link_speed_mbps"] == 866
+
+
+def test_snapshot_reports_disk_capacity() -> None:
+    snapshot = build_snapshot(FakeClient())
+    assert snapshot["disks"][0]["mount_point"] == "/"
+    assert snapshot["disks"][0]["total_bytes"] == 1000
+    assert snapshot["disks"][0]["free_bytes"] == 600
+    assert "missing" not in snapshot
 
 
 def test_snapshot_omits_diagnosis_when_the_core_lacks_it() -> None:

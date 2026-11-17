@@ -36,7 +36,10 @@ Rules:
 - Do not invent parameters. Omit a parameter to use its default.
 - When the operator refers back to an earlier proposal, reuse its concrete
   parameters (such as path, pid, or connection); never drop a required target.
-- process.diagnose and network.status are read-only and safe to propose.
+- process.diagnose, network.status, and filesystem.usage are read-only and safe to propose.
+- For disk or filesystem space questions, filesystem.usage reports total, used,
+  free, and used_percent bytes for each mounted filesystem. The observation's
+  disks list already contains the same data when it is available.
 - process.signal and network.prefer are mutations. They are allowed only as
   proposals: the CLI builds an exact plan, shows its hash, and asks the
   operator. You cannot approve or run them.

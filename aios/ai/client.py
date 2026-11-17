@@ -26,6 +26,7 @@ _OBSERVATION_ROUTES = {
     "process.diagnose": "/processes/diagnose",
     "network.connections": "/network/connections",
     "network.status": "/network/status",
+    "filesystem.usage": "/filesystem/usage",
 }
 
 

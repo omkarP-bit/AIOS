@@ -84,6 +84,7 @@ def build_snapshot(
         )
         or {}
     )
+    usage = _optional_observe(client, "filesystem.usage", {"include_pseudo": False}, missing) or {}
 
     snapshot: dict[str, Any] = {
         "notice": CONTEXT_NOTICE,
@@ -104,6 +105,18 @@ def build_snapshot(
             "available_kb": memory.get("available_kb"),
             "used_percent": memory.get("used_percent"),
         },
+        "disks": [
+            {
+                "mount_point": mount.get("mount_point"),
+                "fs_type": mount.get("fs_type"),
+                "total_bytes": mount.get("total_bytes"),
+                "used_bytes": mount.get("used_bytes"),
+                "free_bytes": mount.get("free_bytes"),
+                "used_percent": mount.get("used_percent"),
+            }
+            for mount in (usage.get("mounts") or [])[:10]
+            if isinstance(mount, dict)
+        ],
         "top_processes": [
             {
                 "pid": p.get("pid"),
@@ -189,6 +202,7 @@ def build_snapshot(
             "network": [
                 row.get("name") for row in (snapshot.get("network") or {}).get("interfaces", [])
             ],
+            "disks": [row.get("mount_point") for row in snapshot.get("disks", [])],
         }
     )
     return snapshot
