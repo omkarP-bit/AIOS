@@ -421,6 +421,12 @@ alone does not enable Groq: without `AIOS_ALLOW_EXTERNAL_MODEL=true` the
 planner stays local and does not send anything. The default Groq model name
 changes over time, so set one that appears in the provider's model list.
 
+The `.env` file is resolved independently of the shell's working directory:
+`$AIOS_ENV_FILE`, then `~/.aios/.env`, then the project-root `.env` of a
+checkout, then `./.env`. This keeps a command run from another directory from
+silently falling back to local Ollama. The core reads the same file; its
+service unit sets `WorkingDirectory` to the project root.
+
 Only a compact aggregate snapshot can leave the machine: hostname, kernel,
 CPU/memory totals, process names, and network counts. **Raw file contents are
 never sent.** The provider, model, and a SHA-256 hash of the prompt are

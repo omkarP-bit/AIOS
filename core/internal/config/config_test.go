@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -28,5 +29,31 @@ func TestLoadKeepsExplicitPaths(t *testing.T) {
 	}
 	if settings.LedgerPath != "/tmp/explicit-ledger.jsonl" {
 		t.Fatalf("ledger: %q", settings.LedgerPath)
+	}
+}
+
+func TestDotEnvPathHonoursTheExplicitOverride(t *testing.T) {
+	t.Setenv("AIOS_ENV_FILE", "/tmp/explicit.env")
+	if got := dotEnvPath(); got != "/tmp/explicit.env" {
+		t.Fatalf("dotEnvPath = %q, want the explicit override", got)
+	}
+}
+
+func TestDotEnvPathPrefersTheStateFileOverTheWorkingDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AIOS_ENV_FILE", "")
+	want := filepath.Join(home, ".aios", ".env")
+	if got := dotEnvPath(); got != ".env" {
+		t.Fatalf("dotEnvPath without a state file = %q, want .env", got)
+	}
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("AIOS_MODEL_PROVIDER=groq\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := dotEnvPath(); got != want {
+		t.Fatalf("dotEnvPath = %q, want %q", got, want)
 	}
 }

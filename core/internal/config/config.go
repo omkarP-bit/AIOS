@@ -46,7 +46,7 @@ func Default() Settings {
 // Load reads .env (if present) then the environment.
 func Load() Settings {
 	s := Default()
-	loadDotEnv(".env")
+	loadDotEnv(dotEnvPath())
 	s.APIHost = env("AIOS_API_HOST", s.APIHost)
 	s.APIPort = envInt("AIOS_API_PORT", s.APIPort)
 	s.ProcRoot = env("AIOS_PROC_ROOT", s.ProcRoot)
@@ -91,6 +91,23 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// dotEnvPath resolves .env in one deterministic order: an explicit
+// AIOS_ENV_FILE, then ~/.aios/.env, then ./.env. This mirrors the Python
+// planner so both read the same provider configuration regardless of the
+// process's working directory.
+func dotEnvPath() string {
+	if value := strings.TrimSpace(os.Getenv("AIOS_ENV_FILE")); value != "" {
+		return value
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".aios", ".env")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ".env"
 }
 
 func loadDotEnv(path string) {

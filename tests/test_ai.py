@@ -201,13 +201,42 @@ def test_dotenv_loads_without_overriding_the_environment(monkeypatch, tmp_path) 
     monkeypatch.setattr(envmod, "_LOADED", False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AIOS_TEST_KEEP", "real")
-    (tmp_path / ".env").write_text("AIOS_TEST_KEEP=file\nAIOS_TEST_NEW='value'\n", encoding="utf-8")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("AIOS_TEST_KEEP=file\nAIOS_TEST_NEW='value'\n", encoding="utf-8")
     try:
-        envmod.load_dotenv()
+        envmod.load_dotenv(dotenv)
         assert os.environ["AIOS_TEST_KEEP"] == "real"
         assert os.environ["AIOS_TEST_NEW"] == "value"
     finally:
         os.environ.pop("AIOS_TEST_NEW", None)
+
+
+def test_dotenv_path_does_not_depend_on_the_working_directory(monkeypatch, tmp_path) -> None:
+    import os
+
+    import aios.ai.env as envmod
+
+    monkeypatch.setattr(envmod, "_LOADED", False)
+    monkeypatch.chdir(tmp_path)  # no .env here
+    explicit = tmp_path / "machine.env"
+    explicit.write_text("AIOS_TEST_RESOLVED=explicit\n", encoding="utf-8")
+    monkeypatch.setenv("AIOS_ENV_FILE", str(explicit))
+    try:
+        envmod.load_dotenv()
+        assert os.environ["AIOS_TEST_RESOLVED"] == "explicit"
+    finally:
+        os.environ.pop("AIOS_TEST_RESOLVED", None)
+
+
+def test_dotenv_path_prefers_the_state_file(monkeypatch, tmp_path) -> None:
+    import aios.ai.env as envmod
+
+    home = tmp_path / "home"
+    (home / ".aios").mkdir(parents=True)
+    (home / ".aios" / ".env").write_text("AIOS_MODEL_PROVIDER=groq\n", encoding="utf-8")
+    monkeypatch.delenv("AIOS_ENV_FILE", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    assert envmod.dotenv_path() == home / ".aios" / ".env"
 
 
 # ---------------------------------------------------------------- parsing
