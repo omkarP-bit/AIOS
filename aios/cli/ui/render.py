@@ -451,6 +451,37 @@ def render_memory(memory: dict[str, Any]) -> Panel:
     return Panel(grid, title="Memory", title_align="left", border_style="aios.panel")
 
 
+def render_disk(data: dict[str, Any]) -> Table | Panel:
+    mounts = data.get("mounts") or []
+    if not mounts:
+        return Panel(
+            Text("No mounted filesystems reported.", style="aios.dim"),
+            title="Disk",
+            title_align="left",
+            border_style="aios.panel",
+        )
+    table = _table(title="Disk usage", caption=f"{len(mounts)} filesystems")
+    for column, justify in (
+        ("MOUNT", "left"),
+        ("FS", "left"),
+        ("USED", "right"),
+        ("FREE", "right"),
+        ("TOTAL", "right"),
+        ("USED%", "right"),
+    ):
+        table.add_column(column, justify=justify, no_wrap=True)
+    for mount in mounts:
+        table.add_row(
+            _text(mount.get("mount_point"), max_length=48),
+            _text(mount.get("fs_type"), max_length=12),
+            Text(_human_bytes(mount.get("used_bytes"))),
+            Text(_human_bytes(mount.get("free_bytes"))),
+            Text(_human_bytes(mount.get("total_bytes"))),
+            _percent_text(mount.get("used_percent")),
+        )
+    return table
+
+
 def render_processes(
     data: dict[str, Any],
     *,

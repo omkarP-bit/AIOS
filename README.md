@@ -196,6 +196,7 @@ aios --watch 2 cpu      # refresh until interrupted
 aios processes --limit 5
 aios network --listening
 aios memory
+aios disk
 aios audit --denied
 aios security
 ```

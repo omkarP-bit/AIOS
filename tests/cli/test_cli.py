@@ -61,6 +61,17 @@ def test_status_json_is_machine_readable(runner, fake_client) -> None:
     assert "\x1b" not in result.output
 
 
+def test_disk_json_reports_capacity(runner, fake_client) -> None:
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["disk"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    mount = payload["mounts"][0]
+    assert mount["mount_point"] == "/"
+    assert mount["free_bytes"] == 600_000_000_000
+    assert mount["used_percent"] == 40.0
+
+
 def test_audit_json_counts(runner, fake_client) -> None:
     use(fake_client, json_output=True)
     result = runner.invoke(app, ["audit", "--limit", "5"])

@@ -21,6 +21,7 @@ from aios.cli.ui.render import (
     render_audit,
     render_confirmation,
     render_cpu,
+    render_disk,
     render_error,
     render_memory,
     render_network,
@@ -201,6 +202,27 @@ def test_memory_panel_shows_used_and_swap() -> None:
     assert "50.0%" in output
     assert "16.0 GiB" in output
     assert "swap" in output
+
+
+def test_disk_table_shows_capacity() -> None:
+    payload = {
+        "total": 1,
+        "mounts": [
+            {
+                "mount_point": "/",
+                "fs_type": "btrfs",
+                "total_bytes": 1_000_000_000_000,
+                "used_bytes": 400_000_000_000,
+                "free_bytes": 600_000_000_000,
+                "used_percent": 40.0,
+            }
+        ],
+    }
+    output = render_text(render_disk(payload))
+    assert "Disk usage" in output
+    assert "btrfs" in output
+    assert "40.0%" in output
+    assert "558.8 GiB" in output
 
 
 def test_process_table_is_sorted_view_of_supplied_rows() -> None:

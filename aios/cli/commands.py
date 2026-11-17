@@ -23,6 +23,7 @@ from aios.cli.ui.render import (
     render_audit,
     render_cpu,
     render_diagnose,
+    render_disk,
     render_error,
     render_memory,
     render_network,
@@ -203,6 +204,17 @@ def memory() -> None:
     """
     state = get_state()
     run_view(state, label="reading memory…", fetch=state.client.memory, render=render_memory)
+
+
+@app.command()
+@guarded
+def disk() -> None:
+    """Disk capacity for each mounted filesystem.
+
+    Example: aios disk
+    """
+    state = get_state()
+    run_view(state, label="reading disk usage…", fetch=state.client.disk, render=render_disk)
 
 
 @app.command()

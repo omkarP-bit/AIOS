@@ -100,6 +100,24 @@ NETWORK_STATUS = {
     "notes": [],
 }
 
+DISK = {
+    "total": 1,
+    "mounts": [
+        {
+            "name": "/dev/nvme0n1p2",
+            "mount_point": "/",
+            "fs_type": "btrfs",
+            "options": ["rw", "relatime"],
+            "total_bytes": 1_000_000_000_000,
+            "used_bytes": 400_000_000_000,
+            "free_bytes": 600_000_000_000,
+            "used_percent": 40.0,
+            "inodes_total": 1_000_000,
+            "inodes_used": 400_000,
+        }
+    ],
+}
+
 HEALTH = {
     "status": "ok",
     "version": "0.7.0",
@@ -154,6 +172,7 @@ class FakeClient:
         self.apply_verdict = kwargs.get("apply_verdict")
         self.diagnose_data = kwargs.get("diagnose", DIAGNOSE)
         self.network_status_data = kwargs.get("network_status", NETWORK_STATUS)
+        self.disk_data = kwargs.get("disk", DISK)
         self.schema_data = kwargs.get("schema", SCHEMA)
         self.calls: list[tuple[str, Any]] = []
 
@@ -169,6 +188,7 @@ class FakeClient:
             "process.diagnose": self.diagnose_data,
             "network.connections": self.network_data,
             "network.status": self.network_status_data,
+            "filesystem.usage": self.disk_data,
         }[action]
 
     def status(self) -> dict[str, Any]:
@@ -191,6 +211,9 @@ class FakeClient:
 
     def network_status(self) -> dict[str, Any]:
         return self.network_status_data
+
+    def disk(self) -> dict[str, Any]:
+        return self.disk_data
 
     def health(self) -> dict[str, Any]:
         return self.health_data

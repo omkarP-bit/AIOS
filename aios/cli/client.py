@@ -32,6 +32,7 @@ _OBSERVATION_ROUTES = {
     "process.diagnose": "/processes/diagnose",
     "network.connections": "/network/connections",
     "network.status": "/network/status",
+    "filesystem.usage": "/filesystem/usage",
 }
 
 _PROCESS_SORTS = {"cpu": "cpu", "mem": "memory", "memory": "memory", "pid": "pid", "name": "name"}
@@ -167,6 +168,9 @@ class CoreClient:
             "network.status",
             {"include_wireless": True, "include_link_speed": True},
         )
+
+    def disk(self) -> dict[str, Any]:
+        return self.observe("filesystem.usage", {"include_pseudo": False})
 
     # -- operator views ------------------------------------------------
 
