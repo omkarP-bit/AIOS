@@ -39,23 +39,53 @@ def data_trust(verdict: dict[str, Any]) -> object:
 
 
 def denial_answer(verdict: dict[str, Any], plan: PlanResult) -> str:
-    """A truthful reply when the core denies: nothing ran, and what still can.
+    """A truthful reply when the core denies: nothing ran, and what is needed.
 
     The model's prose is discarded here because it often promises to perform
-    the very action the core refused.
+    the very action the core refused. The guidance names the real gate: an
+    exact capability grant, or an operator-approved mutation plan.
     """
     action = verdict.get("action")
     if not action and plan.request is not None:
         action = plan.request.action_name
     target = verdict.get("target")
-    reason = verdict.get("denial_reason") or verdict.get("reason") or "denied by policy"
+    code = str(verdict.get("denial_reason") or "")
+    reason = code or verdict.get("reason") or "denied by policy"
     what = f"{action} on {target}" if target else str(action or "that action")
-    return (
-        f"I can't do that: policy denied {what} ({reason}), so nothing was run. "
-        "I can still help with read-only observations such as system status, "
-        "memory, processes, or network connections. If you expected this to be "
-        "allowed, the core needs a capability grant for that action and target."
-    )
+    denied = f"I can't do that: policy denied {what} ({reason}), so nothing was run."
+
+    if code == "forbidden_action":
+        guidance = "That action is permanently forbidden and cannot be granted."
+    elif code in {
+        "approval_missing",
+        "approval_invalid",
+        "approval_expired",
+        "approval_plan_mismatch",
+        "plan_contains_forbidden_step",
+    }:
+        guidance = (
+            "Mutations need an operator-approved plan and its exact plan hash; "
+            "the AI cannot approve one. See `aios-core cleanup --help`."
+        )
+    elif action == "filesystem.cleanup_scan":
+        guidance = (
+            "Capabilities are deny-by-default and scoped to an exact action and "
+            "path. The operator flow `aios-core cleanup scan PATH --plan-out "
+            "plan.json` grants the scan for that path and writes an approvable "
+            "plan; moving or restoring files still needs that plan approved."
+        )
+    elif action in {"filesystem.quarantine", "filesystem.restore"}:
+        guidance = (
+            "Mutations need an operator-approved plan and its exact plan hash; "
+            "the AI cannot approve one. See `aios-core cleanup --help`."
+        )
+    else:
+        guidance = (
+            "Capabilities are deny-by-default: the core needs a grant for this "
+            "exact action and target. Ask the operator to grant it, or use the "
+            "operator CLI."
+        )
+    return f"{denied} {guidance}"
 
 
 @dataclass

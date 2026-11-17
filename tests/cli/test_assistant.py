@@ -46,8 +46,33 @@ def test_denial_answer_is_truthful_and_helpful() -> None:
     assert "policy denied filesystem.cleanup_scan on /" in answer
     assert "capability_missing" in answer
     assert "nothing was run" in answer
-    assert "read-only observations" in answer
+    assert "deny-by-default" in answer
+    assert "aios-core cleanup scan" in answer
     assert "I'll scan" not in answer
+
+
+def test_denial_answer_explains_the_plan_gate_for_mutations() -> None:
+    verdict = {
+        "decision": "DENY",
+        "action": "filesystem.quarantine",
+        "target": "/home/u/.cache/old",
+        "denial_reason": "approval_missing",
+    }
+    answer = denial_answer(verdict, _plan())
+    assert "operator-approved plan" in answer
+    assert "plan hash" in answer
+
+
+def test_denial_answer_marks_forbidden_actions_as_permanent() -> None:
+    verdict = {
+        "decision": "DENY",
+        "action": "filesystem.write",
+        "target": "/etc/passwd",
+        "denial_reason": "forbidden_action",
+    }
+    answer = denial_answer(verdict, _plan())
+    assert "permanently forbidden" in answer
+    assert "cannot be granted" in answer
 
 
 def test_history_note_keeps_the_concrete_target() -> None:

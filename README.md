@@ -197,8 +197,9 @@ thinking, proposal, verdict, or result panels. `/details` (or `aios --verbose
 chat`) shows those panels for the rest of the session. A `CONFIRM` card is
 always shown before asking, because the operator must see the real action and
 target. A denial always produces a truthful answer that says policy refused
-the action and nothing ran, plus read-only observations that are still
-available; the model's prose is not reused when it claims the action will run.
+the action and nothing ran, plus the actual gate: an exact capability grant or
+an operator-approved mutation plan. The model's prose is not reused when it
+claims the action will run.
 
 Audit times are converted from the ledger's UTC timestamps to the operator's
 local timezone; `--json` keeps the exact RFC 3339 value.
