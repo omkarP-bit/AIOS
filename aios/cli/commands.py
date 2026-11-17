@@ -13,6 +13,7 @@ from rich.live import Live
 from rich.text import Text
 
 import aios
+from aios.ai.providers import provider_status
 from aios.cli.assistant import Assistant
 from aios.cli.chat import run_chat
 from aios.cli.errors import CliError, UsageError
@@ -25,6 +26,7 @@ from aios.cli.ui.render import (
     render_memory,
     render_network,
     render_processes,
+    render_provider,
     render_security,
     render_status,
 )
@@ -299,6 +301,23 @@ def security() -> None:
         fetch=state.client.security_summary,
         render=render_security,
     )
+
+
+@app.command()
+@guarded
+def model() -> None:
+    """Show the model provider, model, and readiness (the key stays hidden).
+
+    Examples:
+      aios model
+      aios --json model
+    """
+    state = get_state()
+    status = provider_status()
+    if state.json_output:
+        state.print_json(status)
+    else:
+        state.console.print(render_provider(status))
 
 
 @app.command()

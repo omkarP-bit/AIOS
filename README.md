@@ -207,7 +207,12 @@ aios network --listening
 aios audit --denied --limit 25
 aios actions
 aios security
+aios model                  # provider, model, key presence, readiness
 ```
+
+`aios model` explains why a provider is or is not ready without printing the
+API key. It is the first thing to check when `aios ask` or `aios chat` reports
+that the model could not answer.
 
 All views sanitize untrusted text before rendering. ANSI escapes, control
 characters, and bidi overrides are stripped, long values are truncated with
@@ -344,7 +349,14 @@ External inference is **disabled by default**. All three settings are required:
 AIOS_MODEL_PROVIDER=groq
 AIOS_ALLOW_EXTERNAL_MODEL=true
 AIOS_GROQ_API_KEY=...
+AIOS_GROQ_MODEL=qwen/qwen3.8-27b   # must be a model your key can use
 ```
+
+Run `aios model` after editing `.env`; it shows the selected provider, the
+model, whether the key is present, and whether external use is allowed. A key
+alone does not enable Groq: without `AIOS_ALLOW_EXTERNAL_MODEL=true` the
+planner stays local and does not send anything. The default Groq model name
+changes over time, so set one that appears in the provider's model list.
 
 Only a compact aggregate snapshot can leave the machine: hostname, kernel,
 CPU/memory totals, process names, and network counts. **Raw file contents are

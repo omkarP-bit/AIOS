@@ -75,15 +75,24 @@ def policy_unavailable() -> ServiceUnavailable:
     )
 
 
-def model_unavailable(cause: object | None = None) -> CliError:
-    detail = f" ({type(cause).__name__})" if cause is not None else ""
-    return CliError(
-        f"The local model could not answer{detail}.",
-        next_step=(
-            "Start Ollama, pull the configured model, and retry: "
-            "`ollama serve` / `ollama pull qwen2.5:3b-instruct-q4_K_M`"
-        ),
-    )
+def model_unavailable(cause: object | None = None, *, provider: str = "ollama") -> CliError:
+    reason = str(cause) if cause is not None else "the provider did not answer"
+    label = {"groq": "Groq", "ollama": "the local model"}.get(provider, provider)
+    if provider == "groq":
+        next_step = (
+            "Check `aios model`. Groq needs AIOS_MODEL_PROVIDER=groq, "
+            "AIOS_ALLOW_EXTERNAL_MODEL=true, a valid AIOS_GROQ_API_KEY, and a "
+            "model your key can use (AIOS_GROQ_MODEL)."
+        )
+    elif provider == "ollama":
+        next_step = (
+            "Start Ollama and pull the configured model: "
+            "`ollama serve` / `ollama pull qwen2.5:3b-instruct-q4_K_M`. "
+            "Use `aios model` to see the selected provider."
+        )
+    else:
+        next_step = "Run `aios model` to check the provider configuration."
+    return CliError(f"{label} could not answer: {reason}", next_step=next_step)
 
 
 __all__ = [

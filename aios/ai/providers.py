@@ -47,7 +47,7 @@ class ProviderSettings:
     allow_external_model: bool = False
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "qwen/qwen3.8-27b"
     groq_timeout_s: float = 30.0
     groq_max_tokens: int = 1024
     groq_temperature: float = 0.0
@@ -63,7 +63,7 @@ class ProviderSettings:
             allow_external_model=_env_flag("AIOS_ALLOW_EXTERNAL_MODEL"),
             groq_api_key=os.environ.get("AIOS_GROQ_API_KEY", ""),
             groq_base_url=os.environ.get("AIOS_GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            groq_model=os.environ.get("AIOS_GROQ_MODEL", "llama-3.1-8b-instant"),
+            groq_model=os.environ.get("AIOS_GROQ_MODEL", "qwen/qwen3.8-27b"),
             groq_timeout_s=_env_float("AIOS_GROQ_TIMEOUT_S", 30.0),
             groq_max_tokens=_env_int("AIOS_GROQ_MAX_TOKENS", 1024),
             groq_temperature=_env_float("AIOS_GROQ_TEMPERATURE", 0.0),
@@ -136,6 +136,11 @@ class GroqProvider:
             response.raise_for_status()
             payload = response.json()
             content = payload["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"groq rejected the request ({exc.response.status_code}): "
+                f"{_error_detail(exc.response)}"
+            ) from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderError(f"groq request failed: {type(exc).__name__}") from exc
         if not isinstance(content, str) or not content.strip():
@@ -178,11 +183,29 @@ class OllamaProvider:
             response.raise_for_status()
             payload = response.json()
             content = payload["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"ollama rejected the request ({exc.response.status_code}): "
+                f"{_error_detail(exc.response)}"
+            ) from exc
         except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderError(f"ollama request failed: {type(exc).__name__}") from exc
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("ollama returned an empty completion")
         return content
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """A short, safe message from a provider error body."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return (response.text or "no detail")[:200]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    message = error.get("message") if isinstance(error, dict) else error
+    if not message and isinstance(payload, dict):
+        message = payload.get("detail") or payload.get("message")
+    return str(message or "no detail")[:200]
 
 
 def build_provider(settings: ProviderSettings | None = None) -> ModelProvider:
@@ -214,15 +237,40 @@ def build_provider(settings: ProviderSettings | None = None) -> ModelProvider:
 def provider_status(settings: ProviderSettings | None = None) -> dict[str, Any]:
     """Configuration summary that never includes the API key."""
     settings = settings or ProviderSettings.from_env()
+    provider = settings.model_provider.strip().lower()
+    key_present = bool(settings.groq_api_key)
+    external_allowed = settings.allow_external_model
+    if provider == "groq":
+        ready = external_allowed and key_present
+        model = settings.groq_model
+        hint = _provider_hint(provider, external_allowed=external_allowed, key_present=key_present)
+    elif provider == "ollama":
+        ready = True
+        model = settings.ollama_model
+        hint = ""
+    else:
+        ready = False
+        model = ""
+        hint = "AIOS_MODEL_PROVIDER must be groq or ollama"
     return {
-        "provider": settings.model_provider,
-        "external": settings.model_provider == "groq",
-        "external_allowed": settings.allow_external_model,
-        "configured": settings.groq_enabled if settings.model_provider == "groq" else True,
-        "model": settings.groq_model
-        if settings.model_provider == "groq"
-        else settings.ollama_model,
+        "provider": provider,
+        "external": provider == "groq",
+        "external_allowed": external_allowed,
+        "configured": settings.groq_enabled if provider == "groq" else provider == "ollama",
+        "key_present": key_present,
+        "ready": ready,
+        "hint": hint,
+        "model": model,
     }
+
+
+def _provider_hint(provider: str, *, external_allowed: bool, key_present: bool) -> str:
+    if provider == "groq":
+        if not external_allowed:
+            return "External model use is disabled: set AIOS_ALLOW_EXTERNAL_MODEL=true"
+        if not key_present:
+            return "AIOS_GROQ_API_KEY is not set"
+    return ""
 
 
 __all__ = [

@@ -15,7 +15,7 @@ from rich.prompt import Confirm
 
 from aios.ai.context import build_snapshot, render_snapshot
 from aios.ai.planner import ANSWER_PROMPT, Planner, PlanResult, ProposalError, parse_answer
-from aios.ai.providers import ProviderError, build_provider
+from aios.ai.providers import ProviderError, ProviderSettings, build_provider
 from aios.cli.errors import CliError, ServiceUnavailable, model_unavailable
 from aios.cli.state import AppState
 from aios.cli.ui.render import (
@@ -52,15 +52,18 @@ class Assistant:
         self.session_id = "chat-" + secrets.token_hex(6)
         self.history: list[tuple[str, str]] = []
         self._provider = None
+        self._provider_name = "ollama"
 
     # -- components ----------------------------------------------------
 
     def provider(self):
         if self._provider is None:
+            settings = ProviderSettings.from_env()
+            self._provider_name = settings.model_provider
             try:
-                self._provider = build_provider()
+                self._provider = build_provider(settings)
             except ProviderError as exc:
-                raise model_unavailable(exc) from exc
+                raise model_unavailable(exc, provider=settings.model_provider) from exc
         return self._provider
 
     def catalog(self):
@@ -104,7 +107,7 @@ class Assistant:
             return result
         except (ProposalError, ProviderError) as exc:
             friendly = (
-                model_unavailable(exc)
+                model_unavailable(exc, provider=self._provider_name)
                 if isinstance(exc, ProviderError)
                 else CliError(
                     f"The model's answer could not be used: {exc}",

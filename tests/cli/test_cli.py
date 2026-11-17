@@ -272,13 +272,36 @@ def test_model_failure_is_friendly(runner, fake_client, monkeypatch) -> None:
 
     monkeypatch.setattr(
         "aios.cli.assistant.build_provider",
-        lambda: (_ for _ in ()).throw(ProviderError("no model")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ProviderError("no model")),
     )
     use(fake_client)
     result = runner.invoke(app, ["ask", "hello"])
     assert result.exit_code == 1
     assert "local model" in result.output
     assert "Traceback" not in result.output
+
+
+def test_provider_error_names_the_configured_provider(runner, fake_client, monkeypatch) -> None:
+    from aios.ai.providers import ProviderError
+
+    class Failing:
+        name = "groq"
+        model = "test-model"
+        external = True
+
+        def complete(self, _system, _user):
+            raise ProviderError("groq rejected the request (401): Invalid API Key")
+
+    monkeypatch.setenv("AIOS_MODEL_PROVIDER", "groq")
+    monkeypatch.setenv("AIOS_ALLOW_EXTERNAL_MODEL", "true")
+    monkeypatch.setenv("AIOS_GROQ_API_KEY", "secret")
+    monkeypatch.setattr("aios.cli.assistant.build_provider", lambda *_args, **_kwargs: Failing())
+    use(fake_client)
+    result = runner.invoke(app, ["ask", "hello"])
+    assert result.exit_code == 1
+    assert "Groq could not answer" in result.output
+    assert "Invalid API Key" in result.output
+    assert "Ollama" not in result.output
 
 
 def test_provider_mentioning_control_chars_is_escaped(runner, fake_client, provider) -> None:
@@ -295,6 +318,43 @@ def test_provider_mentioning_control_chars_is_escaped(runner, fake_client, provi
     result = runner.invoke(app, ["ask", "hello"])
     assert result.exit_code == 0
     assert "\x1b" not in result.output
+
+
+def test_model_command_shows_the_config_without_the_key(runner, monkeypatch) -> None:
+    monkeypatch.setenv("AIOS_MODEL_PROVIDER", "groq")
+    monkeypatch.setenv("AIOS_ALLOW_EXTERNAL_MODEL", "true")
+    monkeypatch.setenv("AIOS_GROQ_API_KEY", "super-secret-key")
+    monkeypatch.setenv("AIOS_GROQ_MODEL", "test-model")
+    use(object())
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 0
+    assert "groq" in result.output
+    assert "test-model" in result.output
+    assert "external" in result.output
+    assert "super-secret-key" not in result.output
+
+
+def test_model_command_explains_a_missing_opt_in(runner, monkeypatch) -> None:
+    monkeypatch.setenv("AIOS_MODEL_PROVIDER", "groq")
+    monkeypatch.setenv("AIOS_ALLOW_EXTERNAL_MODEL", "false")
+    monkeypatch.setenv("AIOS_GROQ_API_KEY", "secret")
+    use(object())
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 0
+    assert "AIOS_ALLOW_EXTERNAL_MODEL" in result.output
+
+
+def test_model_command_json(runner, monkeypatch) -> None:
+    monkeypatch.setenv("AIOS_MODEL_PROVIDER", "groq")
+    monkeypatch.setenv("AIOS_ALLOW_EXTERNAL_MODEL", "true")
+    monkeypatch.setenv("AIOS_GROQ_API_KEY", "secret")
+    use(object(), json_output=True)
+    result = runner.invoke(app, ["model"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["provider"] == "groq"
+    assert payload["ready"] is True
+    assert "secret" not in result.output
 
 
 def test_health_services_are_shown(runner, fake_client) -> None:

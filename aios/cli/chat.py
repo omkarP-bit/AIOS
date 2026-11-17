@@ -14,6 +14,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.text import Text
 
+from aios.ai.providers import ProviderSettings, provider_status
 from aios.cli.assistant import Assistant
 from aios.cli.client import ensure_parent
 from aios.cli.errors import CliError
@@ -169,11 +170,12 @@ def _bindings() -> KeyBindings:
 
 
 def _model_label(assistant: Assistant) -> str:
-    try:
-        provider = assistant.provider()
-    except CliError:
-        return "unavailable"
-    return f"{provider.name}:{provider.model}"
+    # Configuration only: never make a network call while drawing the toolbar.
+    status = provider_status(ProviderSettings.from_env())
+    label = f"{status['provider']}:{status['model']}"
+    if not status["ready"]:
+        label += " (not ready)"
+    return label
 
 
 def _refresh_health(state: AppState, chat: ChatState) -> None:

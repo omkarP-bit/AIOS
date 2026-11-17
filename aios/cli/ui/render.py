@@ -607,6 +607,59 @@ def render_security(summary: dict[str, Any]) -> Panel:
 # --- verdicts and chat -----------------------------------------------------
 
 
+def render_provider(status: dict[str, Any]) -> Panel:
+    """Provider configuration. Never includes the API key."""
+    provider = str(status.get("provider") or "unknown").lower()
+    external = bool(status.get("external"))
+    ready = bool(status.get("ready"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="aios.dim", no_wrap=True)
+    grid.add_column(overflow="fold")
+    grid.add_row("provider", _text(provider, max_length=32))
+    grid.add_row("model", _text(status.get("model") or "-", max_length=64))
+    grid.add_row(
+        "access",
+        Text(
+            "external - prompts leave this machine"
+            if external
+            else "local only - nothing leaves this machine",
+            style="yellow" if external else "green",
+        ),
+    )
+    if provider == "groq":
+        grid.add_row(
+            "api key",
+            Text(
+                "configured",
+                style="green",
+            )
+            if status.get("key_present")
+            else Text("missing", style="bold red"),
+        )
+        grid.add_row(
+            "external",
+            Text(
+                "allowed",
+                style="green",
+            )
+            if status.get("external_allowed")
+            else Text("disabled", style="bold red"),
+        )
+    grid.add_row(
+        "config", Text("complete", style="green") if ready else Text("incomplete", style="bold red")
+    )
+    hint = status.get("hint")
+    body: Any = grid
+    if hint:
+        body = Group(grid, Text(""), _text(hint, max_length=240, style="aios.warn"))
+    return Panel(
+        body,
+        title="Model provider",
+        title_align="left",
+        border_style="aios.ok" if ready else "aios.warn",
+    )
+
+
 def render_verdict(verdict: dict[str, Any], *, target: str | None = None) -> Panel:
     decision = str(verdict.get("decision") or "UNKNOWN").upper()
     risk = str(verdict.get("risk") or "UNKNOWN").upper()

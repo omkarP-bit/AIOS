@@ -109,6 +109,44 @@ def test_provider_settings_read_the_environment(monkeypatch) -> None:
     assert settings.model_provider == "groq"
 
 
+def test_provider_status_reports_missing_opt_in() -> None:
+    status = provider_status(ProviderSettings(model_provider="groq", groq_api_key="secret"))
+    assert status["ready"] is False
+    assert status["key_present"] is True
+    assert "AIOS_ALLOW_EXTERNAL_MODEL" in status["hint"]
+    assert "secret" not in json.dumps(status)
+
+
+def test_provider_status_reports_ready_groq() -> None:
+    status = provider_status(
+        ProviderSettings(model_provider="groq", allow_external_model=True, groq_api_key="secret")
+    )
+    assert status["ready"] is True
+    assert status["external"] is True
+    assert status["hint"] == ""
+
+
+def test_provider_status_reports_unknown_provider() -> None:
+    status = provider_status(ProviderSettings(model_provider="dreams", allow_external_model=True))
+    assert status["ready"] is False
+    assert "groq or ollama" in status["hint"]
+
+
+def test_groq_error_message_includes_the_api_detail(monkeypatch) -> None:
+    from aios.ai import providers
+
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(401, json={"error": {"message": "Invalid API Key"}}, request=request)
+
+    def refuse(*_args, **_kwargs):
+        raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(providers.httpx, "post", refuse)
+    provider = providers.GroqProvider("key", "model")
+    with pytest.raises(ProviderError, match="Invalid API Key"):
+        provider.complete("system", "user")
+
+
 def test_provider_status_never_contains_the_key() -> None:
     settings = ProviderSettings(
         model_provider="groq", allow_external_model=True, groq_api_key="super-secret"

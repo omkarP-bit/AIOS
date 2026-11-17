@@ -206,5 +206,5 @@ def fake_client() -> FakeClient:
 @pytest.fixture
 def provider(monkeypatch):
     fake = FakeProvider()
-    monkeypatch.setattr("aios.cli.assistant.build_provider", lambda: fake)
+    monkeypatch.setattr("aios.cli.assistant.build_provider", lambda *_args, **_kwargs: fake)
     return fake
