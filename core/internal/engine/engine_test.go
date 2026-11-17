@@ -205,3 +205,30 @@ func TestMutationRoundTripThroughEngine(t *testing.T) {
 		t.Fatalf("restore failed: %v %q", err, content)
 	}
 }
+
+func TestCompletedLedgerRowKeepsTheExactTarget(t *testing.T) {
+	e := testEngine(t, fixedPolicy{policy.Allow, "allowed"})
+	e.Capabilities.Grant("local-agent", capability.Capability{
+		Action: "process.inspect", Scope: []string{"1"},
+		GrantedBy: "test", Reason: "target audit test",
+	})
+	req, err := protocol.NewRequest("process.inspect", map[string]any{"pid": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := e.Process(req, nil, nil)
+	if verdict.Decision != policy.Allow {
+		t.Fatalf("unexpected verdict: %+v", verdict)
+	}
+	entries := e.Ledger.ByAction(req.ActionID)
+	if len(entries) == 0 {
+		t.Fatal("no ledger rows")
+	}
+	last := entries[len(entries)-1]
+	if last.State != string(protocol.StateCompleted) {
+		t.Fatalf("last state is %q, want COMPLETED", last.State)
+	}
+	if last.Target == nil || *last.Target != "1" {
+		t.Fatalf("completed row lost its target: %+v", last)
+	}
+}

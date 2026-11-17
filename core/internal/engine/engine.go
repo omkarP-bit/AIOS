@@ -207,7 +207,7 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 		e.log(req, protocol.StateExecuted, risk, policy.Allow, name+" applied",
 			&check, &durationMS, nil, &target)
 		e.transition(req, protocol.StateExecuted, protocol.StateCompleted, risk,
-			policy.Allow, "mutation completed", &check, &durationMS, nil, nil)
+			policy.Allow, "mutation completed", &check, &durationMS, nil, &target)
 		actionResult := &ActionResult{
 			ActionID: req.ActionID, State: string(protocol.StateCompleted),
 			Success: true, Data: step, Source: "executor:" + name,
@@ -239,7 +239,7 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 		fmt.Sprintf("observation returned from %s (%s)", observation.Source, observation.TrustDomain),
 		&check, nil, nil, &target)
 	e.transition(req, protocol.StateObserved, protocol.StateCompleted, risk, policy.Allow,
-		"read-only action completed", &check, &durationMS, nil, nil)
+		"read-only action completed", &check, &durationMS, nil, &target)
 	actionResult := &ActionResult{
 		ActionID: req.ActionID, State: string(protocol.StateCompleted), Success: true,
 		Source: observation.Source, TrustDomain: observation.TrustDomain,
