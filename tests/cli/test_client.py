@@ -158,3 +158,67 @@ def test_plain_http_error_is_general_error() -> None:
 
 def test_unexpected_response_helper_is_exit_4() -> None:
     assert unexpected_response("/health").exit_code == EXIT_UNAVAILABLE
+
+
+def test_build_plan_posts_intent_and_requires_core_ids() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "plan_id": "plan-core",
+                "plan_hash": "sha256:core",
+                "steps": [{"step_id": "step-1", "action": "process.signal"}],
+            },
+        )
+
+    body = client_with(handler).build_plan(
+        "process.signal", {"pid": 42, "signal": "TERM"}, intent="stop it"
+    )
+    assert body["plan_hash"] == "sha256:core"
+    assert seen["path"] == "/actions/plan"
+    assert '"pid":42' in str(seen["body"])
+    assert '"signal":"TERM"' in str(seen["body"])
+
+
+def test_build_plan_rejects_a_response_without_a_hash() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"plan_id": "plan-core", "steps": []})
+
+    with pytest.raises(ServiceUnavailable):
+        client_with(handler).build_plan("process.signal", {"pid": 42, "signal": "TERM"})
+
+
+def test_apply_plan_sends_the_exact_hash() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json={"decision": "ALLOW", "executed": True})
+
+    status, verdict = client_with(handler).apply_plan(
+        "plan-core", "sha256:core", "step-1", action="process.signal"
+    )
+    assert status == 200
+    assert verdict["executed"] is True
+    assert seen["path"] == "/actions/apply"
+    assert "sha256:core" in str(seen["body"])
+
+
+def test_plan_refusal_keeps_the_core_detail() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "error": "zombie_not_killable",
+                "detail": "a zombie is already dead; its parent must reap it",
+            },
+        )
+
+    with pytest.raises(CliError) as caught:
+        client_with(handler).build_plan("process.signal", {"pid": 42, "signal": "KILL"})
+    assert "parent must reap" in caught.value.message

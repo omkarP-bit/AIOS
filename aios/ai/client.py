@@ -23,7 +23,9 @@ _OBSERVATION_ROUTES = {
     "system.memory": "/system/memory",
     "system.hostname": "/system/hostname",
     "process.list": "/processes",
+    "process.diagnose": "/processes/diagnose",
     "network.connections": "/network/connections",
+    "network.status": "/network/status",
 }
 
 

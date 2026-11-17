@@ -123,10 +123,13 @@ class FakeClient:
         self.security_data = kwargs.get("security", SECURITY)
         self.verdict = kwargs.get("verdict", {"decision": "ALLOW", "data": {"ok": True}})
         self.confirm_verdict = kwargs.get("confirm_verdict")
+        self.plan_payload = kwargs.get("plan_payload")
+        self.apply_verdict = kwargs.get("apply_verdict")
+        self.schema_data = kwargs.get("schema", SCHEMA)
         self.calls: list[tuple[str, Any]] = []
 
     def schema(self, *, refresh: bool = False) -> Catalog:
-        return Catalog.from_schema(SCHEMA)
+        return Catalog.from_schema(self.schema_data)
 
     def observe(self, action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
@@ -151,6 +154,26 @@ class FakeClient:
 
     def network(self, *, limit: int = 200, listening_only: bool = False):
         return self.network_data
+
+    def diagnose(self, *, limit: int = 200, include_orphans: bool = True, top_n: int = 5):
+        return {
+            "generated_at": "2026-11-15T10:00:00Z",
+            "total_scanned": 2,
+            "zombies": [],
+            "orphans": [],
+            "top_cpu": [],
+            "top_memory": [],
+            "notes": [],
+        }
+
+    def network_status(self) -> dict[str, Any]:
+        return {
+            "generated_at": "2026-11-15T10:00:00Z",
+            "interfaces": [],
+            "default_interface": None,
+            "default_gateway": None,
+            "notes": [],
+        }
 
     def health(self) -> dict[str, Any]:
         return self.health_data
@@ -178,6 +201,36 @@ class FakeClient:
     def execute(self, request, *, dry_run: bool = False):
         self.calls.append(("execute", request))
         return 200, dict(self.verdict)
+
+    def build_plan(self, action, params, *, intent=None):
+        self.calls.append(("build_plan", (action, dict(params), intent)))
+        if self.plan_payload is not None:
+            return {**self.plan_payload, "action": action}
+        step = {
+            "step_id": "step-1",
+            "action": action,
+            "target": str(params.get("pid") or params.get("connection")),
+            "params": dict(params),
+        }
+        return {
+            "plan_id": "plan-test",
+            "plan_hash": "sha256:test",
+            "kind": action,
+            "action": action,
+            "target": step["target"],
+            "steps": [step],
+            "requires_approval": True,
+        }
+
+    def apply_plan(self, plan_id, plan_hash, step_id, *, action=None):
+        self.calls.append(("apply_plan", (plan_id, plan_hash, step_id, action)))
+        verdict = self.apply_verdict or {
+            "decision": "ALLOW",
+            "executed": True,
+            "target": None,
+            "data": {"status": "ok"},
+        }
+        return 200, dict(verdict)
 
 
 class FakeProvider:

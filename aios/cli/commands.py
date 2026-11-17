@@ -25,10 +25,13 @@ from aios.cli.ui.render import (
     render_error,
     render_memory,
     render_network,
+    render_plan,
     render_processes,
     render_provider,
+    render_result,
     render_security,
     render_status,
+    render_verdict,
 )
 
 app = typer.Typer(
@@ -285,6 +288,88 @@ def actions(
         render=lambda entries: render_actions(entries, denied_only=False),
         to_json=lambda entries: {"entries": entries, "count": len(entries)},
     )
+
+
+@app.command()
+@guarded
+def plan(
+    action: str = typer.Argument(..., help="process.signal or network.prefer."),
+    pid: int | None = typer.Option(None, "--pid", help="Process id for process.signal."),
+    signal: str = typer.Option("TERM", "--signal", help="TERM, KILL, HUP, INT, QUIT, STOP, CONT."),
+    connection: str = typer.Option("", "--connection", help="NetworkManager profile id or UUID."),
+    intent: str = typer.Option("", "--intent", help="Short reason recorded in the plan."),
+) -> None:
+    """Build a core-hashed plan and show every step before any mutation.
+
+    Examples:
+      aios plan process.signal --pid 4242 --signal TERM
+      aios plan network.prefer --connection "Home Wi-Fi"
+    """
+    state = get_state()
+    if action == "process.signal":
+        if pid is None:
+            raise UsageError("process.signal needs --pid", next_step="Pass --pid N.")
+        params: dict[str, Any] = {"pid": pid, "signal": signal.upper()}
+    elif action == "network.prefer":
+        if not connection:
+            raise UsageError(
+                "network.prefer needs --connection",
+                next_step="Pass a NetworkManager profile id or UUID.",
+            )
+        params = {"connection": connection}
+    else:
+        raise UsageError(
+            f"{action} is not a plan action",
+            next_step="Use process.signal or network.prefer.",
+        )
+    with spinner(state, "building plan…"):
+        payload = state.client.build_plan(action, params, intent=intent or None)
+    if state.json_output:
+        state.print_json(payload)
+        return
+    state.console.print(render_plan(payload))
+    state.console.print(
+        Text(
+            "Nothing has run. To approve this exact hash, use `aios apply`.",
+            style="aios.dim",
+        )
+    )
+
+
+@app.command()
+@guarded
+def apply(
+    plan_id: str = typer.Argument(..., help="Plan id printed by `aios plan`."),
+    plan_hash: str = typer.Option(..., "--plan-hash", help="Exact hash being approved."),
+    step_id: str = typer.Option("step-1", "--step-id", help="Approved step to run."),
+    action: str = typer.Option("", "--action", help="Expected action name."),
+) -> None:
+    """Approve one core-built plan by its exact hash and apply it.
+
+    Typing the exact plan hash is the approval. The core checks it against its
+    own stored plan, applies it once, and records the outcome.
+
+    Example:
+      aios apply plan-abc123 --plan-hash sha256:... --step-id step-1
+    """
+    state = get_state()
+    with spinner(state, "applying approved plan…"):
+        _status, verdict = state.client.apply_plan(
+            plan_id, plan_hash, step_id, action=action or None
+        )
+    if state.json_output:
+        state.print_json(verdict)
+        return
+    state.console.print(render_verdict(verdict, target=str(verdict.get("target") or "")))
+    data = verdict.get("data")
+    if data is not None:
+        state.console.print(
+            render_result(
+                data,
+                source=verdict.get("source"),
+                trust_domain=verdict.get("data_trust") or verdict.get("trust_domain"),
+            )
+        )
 
 
 @app.command()

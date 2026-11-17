@@ -553,3 +553,45 @@ def test_all_renderers_return_rich_renderables() -> None:
     ]
     assert all(item is not None for item in renderables)
     assert isinstance(render_processes(processes_payload), Table)
+
+
+def test_plan_card_shows_every_step_and_the_hash() -> None:
+    from aios.cli.ui.render import render_plan
+
+    panel = render_plan(
+        {
+            "action": "process.signal",
+            "target": "4242",
+            "plan_id": "plan-test",
+            "plan_hash": "sha256:abc",
+            "steps": [
+                {
+                    "step_id": "step-1",
+                    "action": "process.signal",
+                    "target": "4242",
+                    "params": {"pid": 4242, "signal": "TERM"},
+                }
+            ],
+        }
+    )
+    text = render_text(panel)
+    assert "step-1" in text
+    assert "process.signal" in text
+    assert "sha256:abc" in text
+
+
+def test_plan_card_neutralizes_hostile_targets() -> None:
+    from aios.cli.ui.render import render_plan
+
+    panel = render_plan(
+        {
+            "action": "network.prefer",
+            "target": "evil\x1b[31mred\x07name",
+            "plan_id": "plan-test",
+            "plan_hash": "sha256:abc",
+            "steps": [],
+        }
+    )
+    text = render_text(panel)
+    assert "\x1b" not in text
+    assert "\x07" not in text

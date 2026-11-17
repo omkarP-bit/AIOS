@@ -11,12 +11,12 @@ import json
 import re
 
 import pytest
-from conftest import AUDIT, HEALTH, PROCESSES
+from conftest import AUDIT, HEALTH, PROCESSES, SCHEMA, FakeClient
 from typer.testing import CliRunner
 
 from aios.cli.commands import app
 from aios.cli.config import Config
-from aios.cli.state import build_state, set_state
+from aios.cli.state import build_state, get_state, set_state
 
 ANSI = re.compile(r"\x1b|\x07|\r")
 
@@ -411,3 +411,160 @@ def test_process_limit_is_passed_through(runner, fake_client) -> None:
     result = runner.invoke(app, ["processes", "--limit", "7", "--sort", "mem"])
     assert result.exit_code == 0
     assert seen == {"limit": 7, "sort_by": "mem"}
+
+
+PLAN_SCHEMA = {
+    **SCHEMA,
+    "allowed_actions": [*SCHEMA["allowed_actions"], "process.signal"],
+    "params_schema": {
+        **SCHEMA["params_schema"],
+        "process.signal": {
+            "properties": {"pid": {"type": "integer"}, "signal": {"type": "string"}}
+        },
+    },
+    "plan_actions": ["process.signal"],
+}
+
+PLAN_PAYLOAD = {
+    "plan_id": "plan-core",
+    "plan_hash": "sha256:core",
+    "kind": "process.signal",
+    "target": "4242",
+    "steps": [
+        {
+            "step_id": "step-1",
+            "action": "process.signal",
+            "target": "4242",
+            "params": {"pid": 4242, "signal": "TERM", "uid": 1000, "name": "sleep"},
+        }
+    ],
+}
+
+APPLY_VERDICT = {
+    "decision": "ALLOW",
+    "executed": True,
+    "action": "process.signal",
+    "target": "4242",
+    "state": "COMPLETED",
+    "risk": "HIGH",
+    "data": {"status": "signal_sent", "signal": "TERM"},
+    "source": "executor:process.signal",
+    "trust_domain": "T1",
+}
+
+
+def test_assistant_plan_is_shown_then_applied_only_after_approval(provider, monkeypatch, capsys):
+    import aios.cli.assistant as assistant_module
+
+    fake = FakeClient(
+        schema=PLAN_SCHEMA,
+        plan_payload=PLAN_PAYLOAD,
+        apply_verdict=APPLY_VERDICT,
+    )
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "process.signal",
+                "params": {"pid": 4242, "signal": "TERM"},
+                "intent": "stop a stray process",
+            }
+        ),
+        json.dumps({"answer": "The process was signalled."}),
+    ]
+    monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: True))
+    use(fake)
+    result = assistant_module.Assistant(get_state()).run(
+        "stop pid 4242", interactive=True, execute_allowed=True
+    )
+    assert result.confirmed is True
+    assert result.approval_plan is not None
+    assert any(name == "build_plan" for name, _ in fake.calls)
+    applied = [payload for name, payload in fake.calls if name == "apply_plan"]
+    assert applied == [("plan-core", "sha256:core", "step-1", "process.signal")]
+    assert "APPROVAL PLAN" in capsys.readouterr().out
+
+
+def test_assistant_plan_is_not_applied_when_not_interactive(provider, monkeypatch):
+    import aios.cli.assistant as assistant_module
+
+    fake = FakeClient(schema=PLAN_SCHEMA, plan_payload=PLAN_PAYLOAD)
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "process.signal",
+                "params": {"pid": 4242, "signal": "TERM"},
+            }
+        )
+    ]
+    asked = False
+
+    def refuse(*_args, **_kwargs):
+        nonlocal asked
+        asked = True
+        return True
+
+    monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(refuse))
+    use(fake)
+    result = assistant_module.Assistant(get_state()).run(
+        "stop pid 4242", interactive=False, execute_allowed=True
+    )
+    assert asked is False
+    assert not any(name == "apply_plan" for name, _ in fake.calls)
+    assert "did not run" in (result.answer or "")
+    assert "sha256:core" in (result.answer or "")
+
+
+def test_assistant_zombie_plan_refusal_is_truthful(provider, monkeypatch):
+    import aios.cli.assistant as assistant_module
+    from aios.cli.errors import CliError
+
+    class ZombieClient(FakeClient):
+        def build_plan(self, action, params, *, intent=None):
+            raise CliError(
+                "a zombie is already dead; its parent must reap it",
+                next_step="Do not signal it.",
+            )
+
+    fake = ZombieClient(schema=PLAN_SCHEMA)
+    provider.responses = [
+        json.dumps(
+            {"action": "process.signal", "params": {"pid": 4242, "signal": "KILL"}}
+        )
+    ]
+    monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: True))
+    use(fake)
+    result = assistant_module.Assistant(get_state()).run(
+        "kill the zombie", interactive=True, execute_allowed=True
+    )
+    assert result.denied is True
+    assert "cannot be killed" in (result.answer or "")
+    assert "parent" in (result.answer or "")
+    assert not any(name == "apply_plan" for name, _ in fake.calls)
+
+
+def test_plan_command_prints_the_core_hash(runner, fake_client) -> None:
+    use(fake_client)
+    result = runner.invoke(app, ["plan", "process.signal", "--pid", "42"])
+    assert result.exit_code == 0
+    assert "sha256:test" in result.output
+    assert "Nothing has run" in result.output
+
+
+def test_plan_command_json_is_machine_readable(runner, fake_client) -> None:
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["plan", "process.signal", "--pid", "42"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["plan_id"] == "plan-test"
+    assert payload["steps"][0]["action"] == "process.signal"
+
+
+def test_apply_command_sends_the_exact_hash(runner, fake_client) -> None:
+    fake_client.apply_verdict = APPLY_VERDICT
+    use(fake_client)
+    result = runner.invoke(
+        app,
+        ["apply", "plan-test", "--plan-hash", "sha256:test", "--step-id", "step-1"],
+    )
+    assert result.exit_code == 0
+    assert ("apply_plan", ("plan-test", "sha256:test", "step-1", None)) in fake_client.calls

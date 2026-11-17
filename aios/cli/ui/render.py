@@ -785,6 +785,48 @@ def render_proposal(request: Any, *, target: str | None = None) -> Panel:
     )
 
 
+def render_plan(plan: dict[str, Any]) -> Panel:
+    """Show every exact step and the hash the operator is being asked to approve.
+
+    The hash is the approval. Nothing here decides anything; it only makes the
+    core-built plan reviewable before the explicit apply call.
+    """
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="aios.dim")
+    grid.add_column(overflow="fold")
+    action = plan.get("action") or plan.get("kind")
+    grid.add_row("action", _text(action, max_length=120))
+    target = plan.get("target")
+    if target:
+        grid.add_row("target", _text(target, max_length=240))
+    steps = plan.get("steps")
+    lines: list[str] = []
+    if isinstance(steps, list):
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            lines.append(
+                f"{index}. {step.get('step_id')}  {step.get('action')}  ->  {step.get('target')}"
+            )
+            params = step.get("params")
+            if isinstance(params, dict) and params:
+                lines.append(
+                    "   " + json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+                )
+    grid.add_row("steps", _block("\n".join(lines), max_length=4000))
+    if plan.get("plan_id"):
+        grid.add_row("plan id", _text(plan.get("plan_id"), max_length=80))
+    grid.add_row("hash", _text(plan.get("plan_hash"), max_length=80, style="bold"))
+    if plan.get("expires_at"):
+        grid.add_row("expires", _text(plan.get("expires_at"), max_length=64))
+    return Panel(
+        grid,
+        title="APPROVAL PLAN",
+        title_align="left",
+        border_style="red",
+    )
+
+
 def render_thinking(plan: dict[str, Any], *, verbose: bool = False) -> Panel:
     if not verbose:
         summary = Text.assemble(
@@ -889,6 +931,7 @@ __all__ = [
     "render_history",
     "render_memory",
     "render_network",
+    "render_plan",
     "render_processes",
     "render_proposal",
     "render_result",

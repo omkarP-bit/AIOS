@@ -29,7 +29,9 @@ _OBSERVATION_ROUTES = {
     "system.memory": "/system/memory",
     "system.hostname": "/system/hostname",
     "process.list": "/processes",
+    "process.diagnose": "/processes/diagnose",
     "network.connections": "/network/connections",
+    "network.status": "/network/status",
 }
 
 _PROCESS_SORTS = {"cpu": "cpu", "mem": "memory", "memory": "memory", "pid": "pid", "name": "name"}
@@ -148,6 +150,24 @@ class CoreClient:
             {"limit": limit, "listening_only": listening_only, "attribute_pids": True},
         )
 
+    def diagnose(
+        self,
+        *,
+        limit: int = 200,
+        include_orphans: bool = True,
+        top_n: int = 5,
+    ) -> dict[str, Any]:
+        return self.observe(
+            "process.diagnose",
+            {"limit": limit, "include_orphans": include_orphans, "top_n": top_n},
+        )
+
+    def network_status(self) -> dict[str, Any]:
+        return self.observe(
+            "network.status",
+            {"include_wireless": True, "include_link_speed": True},
+        )
+
     # -- operator views ------------------------------------------------
 
     def health(self) -> dict[str, Any]:
@@ -202,6 +222,50 @@ class CoreClient:
         payload["dry_run"] = dry_run
         status, body = self._post("/actions/execute", payload, verdict_statuses=True)
         _require_decision(body, "/actions/execute")
+        return status, body
+
+    def build_plan(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        intent: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask the core to build an exact, hash-bound plan.
+
+        The caller supplies only the intent (pid/signal or connection). The
+        core captures target identity and assigns plan and step ids; this
+        client never computes a hash.
+        """
+        payload: dict[str, Any] = {"type": action, "params": params}
+        if intent:
+            payload["intent"] = intent
+        body = self._post("/actions/plan", payload)[1]
+        for key in ("plan_id", "plan_hash"):
+            if not isinstance(body.get(key), str) or not body[key]:
+                raise unexpected_response("/actions/plan")
+        steps = body.get("steps")
+        if not isinstance(steps, list) or not steps or not isinstance(steps[0], dict):
+            raise unexpected_response("/actions/plan")
+        return body
+
+    def apply_plan(
+        self,
+        plan_id: str,
+        plan_hash: str,
+        step_id: str,
+        *,
+        action: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "plan_id": plan_id,
+            "plan_hash": plan_hash,
+            "step_id": step_id,
+        }
+        if action:
+            payload["type"] = action
+        status, body = self._post("/actions/apply", payload, verdict_statuses=True)
+        _require_decision(body, "/actions/apply")
         return status, body
 
 

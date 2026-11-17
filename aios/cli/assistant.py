@@ -22,6 +22,7 @@ from aios.cli.ui.render import (
     render_answer,
     render_confirmation,
     render_error,
+    render_plan,
     render_proposal,
     render_result,
     render_thinking,
@@ -98,6 +99,7 @@ class TurnResult:
     answer: str | None = None
     error: CliError | None = None
     blocks: list[str] = field(default_factory=list)
+    approval_plan: dict[str, Any] | None = None
 
     @property
     def summary(self) -> str:
@@ -206,6 +208,15 @@ class Assistant:
             self._print(render_proposal(plan.request, target=_request_target(plan.request)))
         result.blocks.append("proposal")
 
+        if self.catalog().needs_plan(plan.request.action_name):
+            return self._plan_action_turn(
+                question,
+                plan,
+                result,
+                interactive=interactive,
+                show_actions=show_actions,
+            )
+
         try:
             _status, verdict = state.client.propose(plan.request)
         except ServiceUnavailable as exc:
@@ -293,6 +304,107 @@ class Assistant:
         if getattr(self, "_render_blocks", True):
             self.state.console.print(renderable)
 
+    def _plan_action_turn(
+        self,
+        question: str,
+        plan: PlanResult,
+        result: TurnResult,
+        *,
+        interactive: bool,
+        show_actions: bool,
+    ) -> TurnResult:
+        """Build, show, and only then apply an exact plan for a mutation.
+
+        The model proposes; the core builds the hash-bound plan; the operator
+        sees every step and approves that hash. A non-interactive turn stops
+        after the plan and never applies it.
+        """
+        request = plan.request
+        if request is None:
+            result.answer = "No action was proposed."
+            return result
+        params = _plan_intent_params(request.action_name, request.params)
+        try:
+            planned = self.state.client.build_plan(
+                request.action_name, params, intent=request.intent
+            )
+        except CliError as exc:
+            result.denied = True
+            result.answer = _plan_failure(request.action_name, params, exc.message)
+            return result
+
+        result.approval_plan = planned
+        if show_actions:
+            self._print(render_plan(planned))
+        result.blocks.append("plan")
+
+        plan_id = str(planned.get("plan_id"))
+        plan_hash = str(planned.get("plan_hash"))
+        steps = planned.get("steps") or []
+        step_id = str(steps[0].get("step_id")) if steps and isinstance(steps[0], dict) else ""
+
+        if not interactive:
+            result.answer = (
+                f"I prepared plan {plan_id} (hash {plan_hash}), but did not run it. "
+                "A mutation needs the operator's explicit approval of that exact hash. "
+                f"Review it, then run `aios apply {plan_id} --plan-hash {plan_hash} "
+                f"--step-id {step_id}`."
+            )
+            return result
+
+        if not self._ask_plan_approval():
+            result.answer = "Not approved, so nothing was run."
+            return result
+
+        try:
+            _status, verdict = self.state.client.apply_plan(
+                plan_id, plan_hash, step_id, action=request.action_name
+            )
+        except CliError as exc:
+            result.error = exc
+            return result
+        result.verdict = verdict
+        result.confirmed = True
+        target = verdict.get("target") or planned.get("target")
+        if show_actions:
+            self._print(render_verdict(verdict, target=str(target or "")))
+        result.blocks.append("approved")
+
+        if str(verdict.get("decision") or "").upper() == "DENY":
+            result.denied = True
+            result.answer = denial_answer(verdict, plan)
+            return result
+
+        data = verdict.get("data")
+        if data is not None:
+            if show_actions:
+                self._print(
+                    render_result(
+                        data,
+                        source=verdict.get("source"),
+                        trust_domain=data_trust(verdict),
+                    )
+                )
+            result.blocks.append("result")
+            try:
+                result.answer = self._answer_with_observation(question, data)
+            except (ProviderError, ProposalError):
+                result.answer = plan.answer or "The approved plan completed."
+        else:
+            result.answer = plan.answer or "The approved plan completed."
+        return result
+
+    def _ask_plan_approval(self) -> bool:
+        try:
+            return Confirm.ask(
+                "Approve this exact plan hash and run it?",
+                default=False,
+                console=self.state.console,
+            )
+        except (KeyboardInterrupt, EOFError):
+            self.state.console.print("[dim]not approved[/dim]")
+            return False
+
     def _ask_approval(self) -> bool:
         try:
             return Confirm.ask("Approve?", default=False, console=self.state.console)
@@ -329,10 +441,40 @@ def _plan_dict(plan: PlanResult) -> dict[str, Any]:
 
 def _request_target(request: Any) -> str:
     params = getattr(request, "params", None) or {}
-    for key in ("path", "pid", "uid"):
+    for key in ("path", "pid", "uid", "connection"):
         if key in params:
             return str(params[key])
     return ""
+
+
+def _plan_intent_params(action: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the operator intent. Plan and step ids belong to the core."""
+    keys = {
+        "process.signal": ("pid", "signal"),
+        "network.prefer": ("connection",),
+    }.get(action, ())
+    return {key: params[key] for key in keys if key in params}
+
+
+def _plan_failure(action: str, params: dict[str, Any], message: str) -> str:
+    target = params.get("pid") or params.get("connection") or "the requested target"
+    lowered = message.lower()
+    if "zombie" in lowered:
+        guidance = (
+            "A zombie is already dead and cannot be killed. Its parent process must "
+            "call wait() or be restarted, and a service manager or init must reap it "
+            "if the parent is gone."
+        )
+    elif "not reachable" in lowered or "networkmanager" in lowered:
+        guidance = (
+            "Network switching needs the core running on the host with access to the "
+            "system D-Bus. The container core cannot change host networking."
+        )
+    elif "owned by uid" in lowered or "not_permitted" in lowered:
+        guidance = "The core may only signal processes owned by its own user."
+    else:
+        guidance = "Nothing was run. Re-check the target, then try again."
+    return f"I cannot build an approvable plan for {action} on {target}: {message} {guidance}"
 
 
 __all__ = ["Assistant", "TurnResult"]
