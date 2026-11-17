@@ -250,6 +250,46 @@ def test_planner_surfaces_decline_reason() -> None:
     assert plan.reason == "no action needed"
 
 
+def test_parse_plan_returns_answer_and_reason() -> None:
+    from aios.ai.planner import parse_plan
+
+    request, reason, answer = parse_plan(
+        '{"action":"none","reason":"nothing to do","answer":"Everything is fine."}',
+        catalog=CATALOG,
+    )
+    assert request is None
+    assert reason == "nothing to do"
+    assert answer == "Everything is fine."
+
+
+def test_parse_answer_falls_back_to_plain_text() -> None:
+    from aios.ai.planner import parse_answer
+
+    assert parse_answer('{"answer":"CPU is idle."}') == "CPU is idle."
+    assert parse_answer("CPU is idle.") == "CPU is idle."
+
+
+def test_planner_puts_history_in_the_prompt() -> None:
+    from aios.ai.planner import build_user_prompt
+
+    prompt = build_user_prompt(
+        "and memory?",
+        "{}",
+        CATALOG,
+        [("user", "how is cpu?"), ("assistant", "CPU is idle.")],
+    )
+    assert "how is cpu?" in prompt
+    assert "CPU is idle." in prompt
+    assert "and memory?" in prompt
+
+
+def test_planner_returns_the_answer() -> None:
+    plan = Planner(
+        FakeProvider('{"action":"none","reason":"done","answer":"All good."}'), CATALOG
+    ).propose("hello", "{}")
+    assert plan.answer == "All good."
+
+
 # ---------------------------------------------------------------- context
 
 
