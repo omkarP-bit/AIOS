@@ -57,21 +57,30 @@ evaluation.
 ```bash
 cd core
 go build ./...
-GOBIN="$HOME/.local/bin" go install ./cmd/aios ./cmd/aiosd
+GOBIN="$HOME/.local/bin" go install ./cmd/aios-core ./cmd/aiosd
 
 cd ..
 python3 -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-`aios` is the operator CLI. `aiosd` runs the HTTP control plane in the
-foreground. The Python planner is installed as `aios-ai` or run with
-`python -m aios.ai`.
+There are two front-ends:
+
+- `aios` — the Python terminal client. Dashboards, AI chat, confirmation
+  cards. It is a thin HTTP client: it never imports the gateway, reads
+  `/proc`, or runs a subprocess.
+- `aios-core` — the Go core CLI. Mutations, cleanup plans, approvals, and
+  direct protocol calls. `aiosd` runs the HTTP control plane in the
+  foreground.
+
+The planner is installed as `aios-ai` or run with `python -m aios.ai`.
 
 Installing the Go commands needs `GOBIN` (or `$(go env GOPATH)/bin`) on
-`PATH`. When upgrading from the old Python backend, remove any leftover
-`aios` console script from the previous install; this package now only
-provides `aios-ai`.
+`PATH`.
+
+Upgrading from a build that installed the Go CLI as `aios`: remove the old
+binary (`rm ~/.local/bin/aios`) so `aios` resolves to the Python client. The Go
+core is now `aios-core`.
 
 ## Containers
 
@@ -115,7 +124,8 @@ make build          # Go binaries in core/bin
 make check          # vet + lint + all tests
 make docker-config  # validate compose
 make docker-build
-make docker-aios ARGS='status --json'
+make docker-aios ARGS='status --json'   # Go core CLI in the container
+make cli ARGS='status --json'           # local Python terminal client
 make shell
 make down
 make docker-clean   # stop and delete the state volume
@@ -140,37 +150,108 @@ and needs no grant:
 ```bash
 aios status
 aios cpu
-aios cpu -w           # refresh until interrupted
+aios --watch 2 cpu      # refresh until interrupted
 aios processes --limit 5
 aios network --listening
+aios memory
+aios audit --denied
+aios security
 ```
 
-Anything shaped like an agent proposal goes through the core:
+Every view is available as JSON with `--json`, which disables colour and
+Rich markup so the output can be piped safely:
 
 ```bash
-echo '{"type":"process.list","params":{"limit":5}}' | aios act
-echo '{"type":"process.inspect","params":{"pid":1}}' | aios act
+aios --json status | jq .health.services
+aios --json audit --limit 10 > audit.json
+```
+
+Anything shaped like an agent proposal goes through the Go core CLI:
+
+```bash
+echo '{"type":"process.list","params":{"limit":5}}' | aios-core act
+echo '{"type":"process.inspect","params":{"pid":1}}' | aios-core act
 #   DENY process.inspect (capability_missing) no capability grant
 ```
 
-Use `aios act --dry-run` to authorize without executing.
+Use `aios-core act --dry-run` to authorize without executing.
 
 The local planner is one command away. It proposes, the core still decides,
 and no approval token is passed to it:
 
 ```bash
-aios ai "how much memory is free?"
-aios ai "list 5 processes" --execute
+aios ask "how much memory is free?"
+aios ask "list 5 processes"
+aios chat
 ```
 
-`aios ai` runs the installed planner (`aios-ai`, then
-`python -m aios.ai`); set `AIOS_PLANNER` to override the program. The core
-must be reachable at `AIOS_API_URL` (`http://127.0.0.1:8000` by default), for
-example from `aios serve` or `make up`. Use `make planner` for the
-containerized path.
+`aios ask` runs one turn: plan → propose → verdict → confirmation → result →
+answer. `aios chat` is a prompt_toolkit session with file history, multiline
+input (Esc+Enter sends), a service-health toolbar, and local slash commands
+(`/help`, `/clear`, `/status`, `/history`, `/audit`, `/actions`, `/session`,
+`/json`, `/exit`). A failed turn prints a friendly error and keeps the
+session alive.
 
-`aios help`, `aios help <command>`, and `aios <command> --help` describe every
-command; `aios version` prints the CLI, protocol, and catalog versions.
+The terminal client displays the verdict it receives; it never decides
+authorization. `ALLOW`, `CONFIRM`, and `DENY` come from the core. A `CONFIRM`
+card names the real action and target and asks `Approve? [y/N]`; the default
+is No, and only an explicit `y` sends the approval back to the core.
+
+## Terminal client
+
+```bash
+aios status                  # dashboard: host, CPU, memory, processes, network, services
+aios cpu --interval 0.5
+aios processes --sort mem --limit 20 --filter postgres
+aios network --listening
+aios audit --denied --limit 25
+aios actions
+aios security
+```
+
+All views sanitize untrusted text before rendering. ANSI escapes, control
+characters, and bidi overrides are stripped, long values are truncated with
+`[truncated]`, and no untrusted string is ever interpreted as Rich markup.
+File contents and process names are data, not formatting.
+
+Exit codes are stable and documented:
+
+| Code | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | general error |
+| 2 | usage or configuration error |
+| 3 | the core denied the action |
+| 4 | the core is unreachable or returned an unexpected shape |
+
+The CLI fails closed: an unreachable core or a malformed response is a clear
+error and a non-zero exit, never a traceback and never a guess.
+
+Configuration lives in `~/.aios/config.toml` and can be overridden by
+environment variables:
+
+```toml
+[api]
+url = "http://127.0.0.1:8000"
+timeout_s = 10
+
+[ui]
+no_color = false
+
+[chat]
+history = "~/.aios/history"
+```
+
+`AIOS_API_URL`, `AIOS_TIMEOUT_S`, `AIOS_THEME`, `AIOS_NO_COLOR`,
+`AIOS_HISTORY`, and `AIOS_CONFIG` override the file. The defaults are
+loopback-only; a non-loopback URL is refused unless `AIOS_ALLOW_REMOTE=1`,
+because the core is an unauthenticated local service.
+
+`aios ask` runs the installed planner (`aios-ai`, then
+`python -m aios.ai`); set `AIOS_PLANNER` to override the program where the Go
+CLI looks for it. The core must be reachable at `AIOS_API_URL`
+(`http://127.0.0.1:8000` by default), for example from `aiosd` or `make up`.
+Use `make planner` for the containerized path.
 
 ## What is allowed by default
 
@@ -182,8 +263,11 @@ process.list  network.connections
 ```
 
 Deliberately **not** granted: `process.inspect`, and every `filesystem`
-action. `filesystem.read` is MEDIUM risk, so it needs a human confirmation that
-this build cannot yet provide — it is refused, not silently allowed.
+action. `filesystem.read` is MEDIUM risk with an `approval: confirm` class, so
+it is escalated as `CONFIRM` rather than allowed silently. The terminal
+client asks first; only an explicit `y` is sent to `POST /actions/confirm`,
+which grants a 30-second capability for that exact action and target and
+executes one request. Anything else stays denied.
 
 ## Reversible cleanup
 
@@ -193,10 +277,10 @@ and an inverse (`filesystem.restore`). Hard delete is not implemented, and
 `filesystem.purge` is permanently forbidden.
 
 ```bash
-aios cleanup scan ~/Downloads --min-age-days 30 --plan-out plan.json
+aios-core cleanup scan ~/Downloads --min-age-days 30 --plan-out plan.json
 # inspect plan.json, then approve the exact hash it printed
-aios cleanup quarantine plan.json --confirm-plan-hash sha256:...
-aios cleanup restore plan.json --confirm-plan-hash sha256:...
+aios-core cleanup quarantine plan.json --confirm-plan-hash sha256:...
+aios-core cleanup restore plan.json --confirm-plan-hash sha256:...
 ```
 
 Four properties keep it reversible and non-delegable:
@@ -235,18 +319,21 @@ there is no second implementation to drift from the Rego.
 ## The AI planner
 
 The model is an untrusted text generator. It proposes; it never authorizes.
-The Python planner fetches the action catalog and an aggregate observation
-snapshot from the Go core, asks the provider for JSON, and posts the resulting
-proposal back to the core.
+The terminal client fetches the action catalog and an aggregate observation
+snapshot from the Go core, asks the provider for JSON, shows the verdict, and
+posts the resulting proposal back to the core.
 
 ```bash
-aiosd                              # or: aios serve
-python -m aios.ai "how is the cpu?"
-python -m aios.ai "list 5 processes" --execute
+aiosd                              # or: make up
+aios ask "how is the cpu?"
+aios ask "list 5 processes"
+aios chat
+python -m aios.ai "how is the cpu?" --execute
 ```
 
-Without `--execute` the core performs a dry run: it validates and authorizes
-but does not execute. A model answer alone can never cause an action.
+`aios ask` always runs through the core. A model answer alone can never cause
+an action: the core performs validation, capability checks, and policy, and
+the client only displays the resulting verdict.
 
 ### Groq is opt-in
 
@@ -275,21 +362,25 @@ AIOS_OLLAMA_MODEL=qwen2.5:3b-instruct-q4_K_M
 ## The two HTTP surfaces
 
 **Operator observation** — `GET /system/*`, `/processes*`,
-`/network/connections`. These call the read-only gateway directly. The caller
-is the local human.
+`/network/connections`, `/audit`, `/security/summary`, `/health`. These call
+the read-only gateway or the ledger directly. The caller is the local human.
 
 **Agent action** — `POST /actions/execute`. This goes through the engine:
 protocol validation, scope consistency, capability check, policy, then
 execution. `POST /actions/validate` checks the wire shape without deciding.
+`POST /actions/propose` returns a decision without executing, so the client
+can show a `CONFIRM` card. `POST /actions/confirm` re-decides a confirm-class
+action as a user-origin request and executes exactly one approved read.
 
 The split is deliberate. If the read routes also required a grant, the
 operator could not look at their own machine. If the agent could reach them, a
 grant would mean nothing.
 
 ```bash
-aios serve
+aiosd
 curl -s localhost:8000/actions/execute -H 'content-type: application/json' \
   -d '{"action_id":"act-demo-01","type":"process.list","params":{"limit":2}}'
+curl -s localhost:8000/security/summary | jq .counts
 ```
 
 A denial returns 403 with the same response body shape and
@@ -315,7 +406,7 @@ controls its bytes.
 
 The core appends one JSON object per transition to a durable JSONL file
 (`AIOS_LEDGER_PATH`, default `~/.local/state/aios/ledger.jsonl`) and fsyncs
-each row. An empty path keeps the ledger in memory. `aios ledger` prints it;
+each row. An empty path keeps the ledger in memory. `aios-core ledger` prints it;
 `/health` reports whether it is durable.
 
 ## Tests
@@ -334,8 +425,11 @@ opa test aios/policies
 The Go suites cover the protocol, catalog parity with Rego data, capabilities,
 plan hashing and approval parity, scanner/executor round-trips, observers,
 engine outcomes, the HTTP API, and the CLI cleanup workflow. The Python suite
-covers the provider boundary, planner parsing, context construction, and the
-HTTP client against a mock core.
+covers the provider boundary, planner parsing, context construction, the HTTP
+client against a mock core, and the terminal client: sanitization, renderer
+snapshots, error and exit-code mapping, JSON cleanliness, hostile process
+names, and an import guard proving the CLI never imports the gateway or runs a
+subprocess.
 
 `tests/test_injection.py` is the planner's attack corpus: every entry must
 either fail to parse or remain an allowed read action. The Go engine tests

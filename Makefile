@@ -8,7 +8,7 @@ COMPOSE ?= docker compose
 
 CORE_DIR := core
 BIN_DIR  := $(CORE_DIR)/bin
-AIOS     := $(BIN_DIR)/aios
+AIOS     := $(BIN_DIR)/aios-core
 AIOSD    := $(BIN_DIR)/aiosd
 
 API_PORT ?= 8000
@@ -19,7 +19,7 @@ HASH     ?=
 
 .PHONY: help all build core-build install-python test test-go test-py test-policy \
         lint fmt vet check docker-config docker-build up down logs ps health \
-        install-go \
+        install-go cli \
         aios docker-aios planner planner-json shell scan quarantine restore \
         clean docker-clean
 
@@ -39,13 +39,13 @@ build: core-build ## Build the Go CLI and daemon into core/bin
 
 core-build: ## Build Go binaries
 	@mkdir -p $(BIN_DIR)
-	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aios ./cmd/aios
+	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aios-core ./cmd/aios-core
 	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aiosd ./cmd/aiosd
 
 install-go: ## Install the Go CLI and daemon onto PATH
-	cd $(CORE_DIR) && GOBIN="$${GOBIN:-$$HOME/.local/bin}" $(GO) install ./cmd/aios ./cmd/aiosd
+	cd $(CORE_DIR) && GOBIN="$${GOBIN:-$$HOME/.local/bin}" $(GO) install ./cmd/aios-core ./cmd/aiosd
 
-install-python: ## Install the Python planner in editable mode
+install-python: ## Install the Python planner and terminal client in editable mode
 	$(PYTHON) -m pip install -e ".[dev]"
 
 test: test-go test-py test-policy ## Run Go, Python, and Rego suites
@@ -96,11 +96,14 @@ health: ## Query the core health endpoint on the host
 	curl -fsS http://127.0.0.1:$(API_PORT)/health
 	@printf "\n"
 
-aios: ## Run the local CLI, e.g. make aios ARGS='status --json'
+aios: ## Run the Go core CLI (mutations), e.g. make aios ARGS='status'
 	$(AIOS) $(ARGS)
 
+cli: ## Run the terminal client, e.g. make cli ARGS='status --json'
+	$(PYTHON) -m aios.cli $(ARGS)
+
 docker-aios: ## Run a one-off CLI command in the core container
-	$(COMPOSE) run --rm --build core aios $(ARGS)
+	$(COMPOSE) run --rm --build core aios-core $(ARGS)
 
 planner: ## Run the containerized planner, e.g. make planner ARGS='"how is cpu?"'
 	$(COMPOSE) run --rm --build planner python -m aios.ai $(ARGS)

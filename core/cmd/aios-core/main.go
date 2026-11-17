@@ -1,7 +1,7 @@
 // Command aios is the operator CLI and the agent proposal path.
 //
 // Read commands call the gateway directly: the caller is the local operator.
-// Anything shaped like a model proposal goes through `aios act`, which uses the
+// Anything shaped like a model proposal goes through `aios-core act`, which uses the
 // security engine, and cleanup mutations require an exact plan hash.
 package main
 
@@ -88,7 +88,7 @@ func run(args []string) int {
 		if suggestion := suggestCommand(args[0]); suggestion != "" {
 			fmt.Fprintf(os.Stderr, "did you mean %q?\n", suggestion)
 		}
-		fmt.Fprintln(os.Stderr, "run 'aios help' to list commands")
+		fmt.Fprintln(os.Stderr, "run 'aios-core help' to list commands")
 		return 2
 	}
 }
@@ -402,7 +402,7 @@ func inspectCommand(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios inspect PID [--json]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core inspect PID [--json]")
 		return 2
 	}
 	var pid int
@@ -467,7 +467,7 @@ func lsCommand(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios ls PATH [--all] [--max N] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core ls PATH [--all] [--max N] [--json]")
 		return 2
 	}
 	result, err := observe(rt, "filesystem.list", idLS, map[string]any{
@@ -532,7 +532,7 @@ func validateCommand(args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios validate [FILE] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core validate [FILE] [--json]")
 		return 2
 	}
 	raw, err := readPayload(fs.Arg(0))
@@ -570,7 +570,7 @@ func actCommand(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios act [FILE] [--dry-run] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core act [FILE] [--dry-run] [--json]")
 		return 2
 	}
 	raw, err := readPayload(fs.Arg(0))
@@ -637,7 +637,7 @@ func cleanupScan(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios cleanup scan PATH [options]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core cleanup scan PATH [options]")
 		return 2
 	}
 	root, err := absolutePath(fs.Arg(0))
@@ -716,7 +716,7 @@ func cleanupQuarantine(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios cleanup quarantine PLAN --confirm-plan-hash HASH")
+		fmt.Fprintln(os.Stderr, "usage: aios-core cleanup quarantine PLAN --confirm-plan-hash HASH")
 		return 2
 	}
 	p, err := loadPlan(fs.Arg(0))
@@ -827,7 +827,7 @@ func cleanupRestore(rt *runtime.Runtime, args []string) int {
 		return parseCode(err)
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aios cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID]")
+		fmt.Fprintln(os.Stderr, "usage: aios-core cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID]")
 		return 2
 	}
 	p, err := loadPlan(fs.Arg(0))

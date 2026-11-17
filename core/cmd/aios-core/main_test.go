@@ -175,7 +175,7 @@ func TestObserveCommandsRun(t *testing.T) {
 
 func TestHelpAndSuggestions(t *testing.T) {
 	code, output := capture(t, func() int { return run([]string{"help", "cpu"}) })
-	if code != 0 || !strings.Contains(output, "aios cpu") || !strings.Contains(output, "Examples") {
+	if code != 0 || !strings.Contains(output, "aios-core cpu") || !strings.Contains(output, "Examples") {
 		t.Fatalf("help failed (%d): %s", code, output)
 	}
 	code, output = capture(t, func() int { return run(nil) })

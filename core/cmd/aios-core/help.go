@@ -9,7 +9,7 @@ import (
 	"aios/internal/catalog"
 )
 
-// commandGroups is the order groups are shown in `aios` and `aios help`.
+// commandGroups is the order groups are shown in `aios` and `aios-core help`.
 var commandGroups = []string{
 	"Observe (read-only)",
 	"AI (proposal path)",
@@ -23,170 +23,170 @@ var commandGroups = []string{
 var commandTable = []commandInfo{
 	{
 		name: "status", group: "Observe (read-only)",
-		usage:   "aios status [--json]",
+		usage:   "aios-core status [--json]",
 		summary: "Host summary: kernel, uptime, load, processes, and cores.",
 		examples: []string{
-			"aios status",
-			"aios status --json",
+			"aios-core status",
+			"aios-core status --json",
 		},
 	},
 	{
 		name: "cpu", group: "Observe (read-only)",
-		usage:   "aios cpu [--interval SECONDS] [-w|--watch] [--json]",
+		usage:   "aios-core cpu [--interval SECONDS] [-w|--watch] [--json]",
 		summary: "Sample CPU use over an interval.",
 		examples: []string{
-			"aios cpu",
-			"aios cpu -w",
-			"aios cpu --interval 1 --json",
+			"aios-core cpu",
+			"aios-core cpu -w",
+			"aios-core cpu --interval 1 --json",
 		},
 	},
 	{
 		name: "memory", group: "Observe (read-only)",
-		usage:   "aios memory [-w|--watch] [--json]",
+		usage:   "aios-core memory [-w|--watch] [--json]",
 		summary: "Memory use and availability.",
 		examples: []string{
-			"aios memory",
-			"aios memory -w",
+			"aios-core memory",
+			"aios-core memory -w",
 		},
 	},
 	{
 		name: "hostname", group: "Observe (read-only)",
-		usage:   "aios hostname [--json]",
+		usage:   "aios-core hostname [--json]",
 		summary: "Print the host name.",
 		examples: []string{
-			"aios hostname",
+			"aios-core hostname",
 		},
 	},
 	{
 		name: "processes", group: "Observe (read-only)",
-		usage:   "aios processes [--limit N] [--sort cpu|memory|pid|name] [--name TEXT] [--json]",
+		usage:   "aios-core processes [--limit N] [--sort cpu|memory|pid|name] [--name TEXT] [--json]",
 		summary: "Process table, sorted and filterable.",
 		examples: []string{
-			"aios processes --limit 5 --sort memory",
-			"aios processes --name ssh",
+			"aios-core processes --limit 5 --sort memory",
+			"aios-core processes --name ssh",
 		},
 	},
 	{
 		name: "inspect", group: "Observe (read-only)",
-		usage:   "aios inspect PID [--json]",
+		usage:   "aios-core inspect PID [--json]",
 		summary: "Inspect one process by PID.",
 		examples: []string{
-			"aios inspect 1",
+			"aios-core inspect 1",
 		},
 	},
 	{
 		name: "network", group: "Observe (read-only)",
-		usage:   "aios network [--limit N] [--listening] [--json]",
+		usage:   "aios-core network [--limit N] [--listening] [--json]",
 		summary: "Socket table with an optional listening-only filter.",
 		examples: []string{
-			"aios network --listening",
+			"aios-core network --listening",
 		},
 	},
 	{
 		name: "mounts", group: "Observe (read-only)",
-		usage:   "aios mounts [--json]",
+		usage:   "aios-core mounts [--json]",
 		summary: "Mounted filesystems and space use.",
 		examples: []string{
-			"aios mounts",
+			"aios-core mounts",
 		},
 	},
 	{
 		name: "ls", group: "Observe (read-only)",
-		usage:   "aios ls PATH [--all] [--max N] [--json]",
+		usage:   "aios-core ls PATH [--all] [--max N] [--json]",
 		summary: "List a directory. Names and metadata only, never contents.",
 		examples: []string{
-			"aios ls ~/Downloads",
-			"aios ls /var/log --all",
+			"aios-core ls ~/Downloads",
+			"aios-core ls /var/log --all",
 		},
 	},
 	{
 		name: "ai", group: "AI (proposal path)",
-		usage:   "aios ai QUESTION... [--execute] [--json] [--no-context]  (alias: ask)",
+		usage:   "aios-core ai QUESTION... [--execute] [--json] [--no-context]  (alias: ask)",
 		summary: "Ask the local planner. It can only propose; the core decides.",
 		examples: []string{
-			`aios ai "how much memory is free?"`,
-			`aios ai "list 5 processes" --execute`,
-			`aios ai "check cpu" --json`,
+			`aios-core ai "how much memory is free?"`,
+			`aios-core ai "list 5 processes" --execute`,
+			`aios-core ai "check cpu" --json`,
 		},
 	},
 	{
 		name: "schema", group: "Protocol",
-		usage:   "aios schema [--json]",
+		usage:   "aios-core schema [--json]",
 		summary: "List the allowed action ids.",
 		examples: []string{
-			"aios schema",
+			"aios-core schema",
 		},
 	},
 	{
 		name: "validate", group: "Protocol",
-		usage:   "aios validate [FILE|-] [--json]",
+		usage:   "aios-core validate [FILE|-] [--json]",
 		summary: "Parse and validate a proposal locally, without the core.",
 		examples: []string{
-			"aios validate proposal.json",
-			"cat proposal.json | aios validate",
+			"aios-core validate proposal.json",
+			"cat proposal.json | aios-core validate",
 		},
 	},
 	{
 		name: "act", group: "Protocol",
-		usage:   "aios act [FILE|-] [--dry-run] [--json]",
+		usage:   "aios-core act [FILE|-] [--dry-run] [--json]",
 		summary: "Send a proposal to the core. --dry-run authorizes without running.",
 		examples: []string{
-			"aios act proposal.json --dry-run",
+			"aios-core act proposal.json --dry-run",
 		},
 	},
 	{
 		name: "cleanup", group: "Cleanup (mutation)",
-		usage:   "aios cleanup scan|quarantine|restore ...",
+		usage:   "aios-core cleanup scan|quarantine|restore ...",
 		summary: "Reversible cleanup. Mutations require the exact plan hash.",
 	},
 	{
 		name: "cleanup scan", group: "Cleanup (mutation)",
-		usage:   "aios cleanup scan PATH [--plan-out FILE] [--min-age-days N] [--json]",
+		usage:   "aios-core cleanup scan PATH [--plan-out FILE] [--min-age-days N] [--json]",
 		summary: "Find cleanup candidates and write an approvable plan.",
 		examples: []string{
-			"aios cleanup scan ~/Downloads --plan-out plan.json",
+			"aios-core cleanup scan ~/Downloads --plan-out plan.json",
 		},
 	},
 	{
 		name: "cleanup quarantine", group: "Cleanup (mutation)",
-		usage:   "aios cleanup quarantine PLAN --confirm-plan-hash HASH [--json]",
+		usage:   "aios-core cleanup quarantine PLAN --confirm-plan-hash HASH [--json]",
 		summary: "Move an approved plan's files into quarantine.",
 		examples: []string{
-			"aios cleanup quarantine plan.json --confirm-plan-hash sha256:...",
+			"aios-core cleanup quarantine plan.json --confirm-plan-hash sha256:...",
 		},
 	},
 	{
 		name: "cleanup restore", group: "Cleanup (mutation)",
-		usage:   "aios cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID] [--json]",
+		usage:   "aios-core cleanup restore PLAN --confirm-plan-hash HASH [--candidate ID] [--json]",
 		summary: "Restore an approved plan from quarantine.",
 		examples: []string{
-			"aios cleanup restore plan.json --confirm-plan-hash sha256:...",
+			"aios-core cleanup restore plan.json --confirm-plan-hash sha256:...",
 		},
 	},
 	{
 		name: "ledger", group: "Audit and service",
-		usage:   "aios ledger [--action ACTION] [--json]",
+		usage:   "aios-core ledger [--action ACTION] [--json]",
 		summary: "Show the append-only audit trail.",
 		examples: []string{
-			"aios ledger",
-			"aios ledger --action filesystem.quarantine",
+			"aios-core ledger",
+			"aios-core ledger --action filesystem.quarantine",
 		},
 	},
 	{
 		name: "version", group: "Audit and service",
-		usage:   "aios version [--json]",
+		usage:   "aios-core version [--json]",
 		summary: "Print CLI, protocol, and catalog versions.",
 		examples: []string{
-			"aios version",
+			"aios-core version",
 		},
 	},
 	{
 		name: "serve", group: "Audit and service",
-		usage:   "aios serve [--host H] [--port N]",
+		usage:   "aios-core serve [--host H] [--port N]",
 		summary: "Run the HTTP control API in the foreground.",
 		examples: []string{
-			"aios serve",
-			"aios serve --port 9000",
+			"aios-core serve",
+			"aios-core serve --port 9000",
 		},
 	},
 }
@@ -215,7 +215,7 @@ The AI proposes. The core decides. The operator authorizes mutations.
 
 Usage:
   aios <command> [options]
-  aios help <command>
+  aios-core help <command>
 
 `)
 	for _, group := range commandGroups {
@@ -229,7 +229,7 @@ Usage:
 		fmt.Println()
 	}
 	fmt.Print(`Every data command accepts --json.
-Run 'aios help <command>' for usage and examples.
+Run 'aios-core help <command>' for usage and examples.
 `)
 }
 
@@ -245,7 +245,7 @@ func helpCommand(args []string) int {
 		if suggestion := suggestCommand(name); suggestion != "" {
 			fmt.Fprintf(os.Stderr, "did you mean %q?\n", suggestion)
 		}
-		fmt.Fprintln(os.Stderr, "run 'aios help' to list commands")
+		fmt.Fprintln(os.Stderr, "run 'aios-core help' to list commands")
 		return 2
 	}
 	fmt.Printf("aios %s\n\n%s\n\nUsage:\n  %s\n", info.name, info.summary, info.usage)
