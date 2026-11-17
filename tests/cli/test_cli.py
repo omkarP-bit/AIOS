@@ -1,0 +1,319 @@
+"""Command-level tests: exit codes, JSON cleanliness, and injection safety.
+
+Commands are driven through Typer's CliRunner with a fake core client, so the
+tests exercise argument parsing, rendering, and exit mapping without a socket
+or a model.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+from conftest import AUDIT, HEALTH, PROCESSES
+from typer.testing import CliRunner
+
+from aios.cli.commands import app
+from aios.cli.config import Config
+from aios.cli.state import build_state, set_state
+
+ANSI = re.compile(r"\x1b|\x07|\r")
+
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+def use(fake, *, json_output: bool = False, verbose: bool = False) -> None:
+    state = build_state(
+        Config(),
+        client=fake,
+        json_output=json_output,
+        no_color=True,
+        verbose=verbose,
+    )
+    set_state(state)
+
+
+def test_version(runner) -> None:
+    use(object())
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert "aios 0.7.0" in result.output
+
+
+def test_version_json(runner) -> None:
+    use(object(), json_output=True)
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["aios"] == "0.7.0"
+
+
+def test_status_json_is_machine_readable(runner, fake_client) -> None:
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload) == {"status", "cpu", "memory", "processes", "network", "health"}
+    assert not ANSI.search(result.output)
+    assert "\x1b" not in result.output
+
+
+def test_audit_json_counts(runner, fake_client) -> None:
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["audit", "--limit", "5"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["count"] == len(AUDIT)
+    assert payload["entries"][0]["action_id"] == "act-allow"
+
+
+def test_process_render_neutralizes_hostile_names(runner) -> None:
+    hostile = {
+        "processes": [
+            {
+                "pid": 666,
+                "name": "evil\x1b[31mred\x07\u202ename",
+                "state": "S",
+                "cpu_percent": 1.0,
+                "rss_bytes": 1024,
+            }
+        ]
+    }
+    from conftest import FakeClient
+
+    use(FakeClient(processes=hostile))
+    result = runner.invoke(app, ["processes"])
+    assert result.exit_code == 0
+    assert "\x1b" not in result.output
+    assert "\x07" not in result.output
+    assert "\u202e" not in result.output
+
+
+def test_audit_render_neutralizes_control_characters(runner) -> None:
+    from conftest import FakeClient
+
+    entries = [
+        {
+            "action_id": "act-\x1b]0;pwned\x07",
+            "action": "filesystem.read\rspoof",
+            "risk": "MEDIUM",
+            "decision": "DENY",
+            "state": "DENIED",
+            "denial_reason": "capability_missing",
+            "at": "2026-11-15T10:01:00Z",
+        }
+    ]
+    use(FakeClient(audit=entries))
+    result = runner.invoke(app, ["audit"])
+    assert result.exit_code == 0
+    assert "\x1b" not in result.output
+    assert "\x07" not in result.output
+    assert "pwned" not in result.output
+
+
+def test_unavailable_core_exits_4(runner) -> None:
+    from aios.cli.errors import ServiceUnavailable
+
+    class Broken:
+        def _fail(self, *_args, **_kwargs):
+            raise ServiceUnavailable("Cannot reach the AIOS core at http://127.0.0.1:8000.")
+
+        status = _fail
+        cpu = _fail
+        memory = _fail
+        processes = _fail
+        network = _fail
+        health = _fail
+
+    use(Broken())
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 4
+    assert "Cannot reach the AIOS core" in result.output
+
+
+def test_unexpected_exception_does_not_show_traceback(runner) -> None:
+    class Exploding:
+        def health(self):
+            raise RuntimeError("boom")
+
+        def status(self):
+            raise RuntimeError("boom")
+
+        def cpu(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        def memory(self):
+            raise RuntimeError("boom")
+
+        def processes(self, **_kwargs):
+            raise RuntimeError("boom")
+
+        def network(self, **_kwargs):
+            raise RuntimeError("boom")
+
+    use(Exploding())
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "unexpected error" in result.output
+
+
+def test_denied_ask_exits_3(runner, fake_client, provider) -> None:
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "filesystem.read",
+                "params": {"path": "/etc/shadow"},
+                "intent": "read a secret",
+            }
+        )
+    ]
+    fake_client.verdict = {
+        "decision": "DENY",
+        "action": "filesystem.read",
+        "risk": "MEDIUM",
+        "denial_reason": "forbidden_action",
+        "target": "/etc/shadow",
+    }
+    use(fake_client)
+    result = runner.invoke(app, ["ask", "read /etc/shadow"])
+    assert result.exit_code == 3
+    assert "DENY" in result.output
+
+
+def test_confirm_not_approved_does_not_execute(runner, fake_client, provider, monkeypatch) -> None:
+    import aios.cli.assistant as assistant_module
+
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "filesystem.read",
+                "params": {"path": "/tmp/note.txt"},
+                "intent": "read a note",
+            }
+        )
+    ]
+    fake_client.verdict = {
+        "decision": "CONFIRM",
+        "action": "filesystem.read",
+        "risk": "MEDIUM",
+        "denial_reason": "confirmation_required",
+        "target": "/tmp/note.txt",
+        "requires_confirmation": True,
+    }
+    monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: False))
+    use(fake_client)
+    state = assistant_module.Assistant
+    from aios.cli.state import get_state
+
+    result = state(get_state()).run("read /tmp/note.txt", interactive=True, execute_allowed=True)
+    assert result.confirmed is False
+    assert all(call[0] != "confirm" for call in fake_client.calls)
+
+
+def test_confirm_approved_executes_once(runner, fake_client, provider, monkeypatch) -> None:
+    import aios.cli.assistant as assistant_module
+    from aios.cli.state import get_state
+
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "filesystem.read",
+                "params": {"path": "/tmp/note.txt"},
+                "intent": "read a note",
+            }
+        ),
+        json.dumps({"answer": "The file says hello."}),
+    ]
+    fake_client.verdict = {
+        "decision": "CONFIRM",
+        "action": "filesystem.read",
+        "risk": "MEDIUM",
+        "denial_reason": "confirmation_required",
+        "target": "/tmp/note.txt",
+        "requires_confirmation": True,
+    }
+    fake_client.confirm_verdict = {
+        "decision": "ALLOW",
+        "action": "filesystem.read",
+        "risk": "MEDIUM",
+        "target": "/tmp/note.txt",
+        "data": {"path": "/tmp/note.txt", "content": "hello"},
+        "trust_domain": "T3",
+        "source": "external",
+    }
+    monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: True))
+    use(fake_client)
+    result = assistant_module.Assistant(get_state()).run(
+        "read /tmp/note.txt", interactive=True, execute_allowed=True
+    )
+    assert result.confirmed is True
+    assert [call[0] for call in fake_client.calls].count("confirm") == 1
+    assert result.answer == "The file says hello."
+
+
+def test_ask_json_has_no_ansi(runner, fake_client, provider) -> None:
+    provider.responses = [
+        json.dumps({"action": "none", "reason": "nothing to do", "answer": "All good."})
+    ]
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["ask", "how are you?"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["answer"] == "All good."
+    assert "\x1b" not in result.output
+
+
+def test_model_failure_is_friendly(runner, fake_client, monkeypatch) -> None:
+    from aios.ai.providers import ProviderError
+
+    monkeypatch.setattr(
+        "aios.cli.assistant.build_provider",
+        lambda: (_ for _ in ()).throw(ProviderError("no model")),
+    )
+    use(fake_client)
+    result = runner.invoke(app, ["ask", "hello"])
+    assert result.exit_code == 1
+    assert "local model" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_provider_mentioning_control_chars_is_escaped(runner, fake_client, provider) -> None:
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "none",
+                "reason": "done",
+                "answer": "hi\x1b[2Jthere\x07 friend",
+            }
+        )
+    ]
+    use(fake_client)
+    result = runner.invoke(app, ["ask", "hello"])
+    assert result.exit_code == 0
+    assert "\x1b" not in result.output
+
+
+def test_health_services_are_shown(runner, fake_client) -> None:
+    use(fake_client)
+    result = runner.invoke(app, ["security"])
+    assert result.exit_code == 0
+    for service in HEALTH["services"]:
+        assert service.upper() in result.output
+
+
+def test_process_limit_is_passed_through(runner, fake_client) -> None:
+    seen = {}
+
+    class Recorder(type(fake_client)):
+        def processes(self, *, limit=50, sort_by="cpu", name_filter=None):
+            seen.update({"limit": limit, "sort_by": sort_by})
+            return PROCESSES
+
+    use(Recorder())
+    result = runner.invoke(app, ["processes", "--limit", "7", "--sort", "mem"])
+    assert result.exit_code == 0
+    assert seen == {"limit": 7, "sort_by": "mem"}
