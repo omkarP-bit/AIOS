@@ -490,6 +490,55 @@ def render_processes(
     return table
 
 
+def render_diagnose(data: dict[str, Any]) -> Panel:
+    """Read-only process diagnosis: zombies, orphans, and top resource users.
+
+    A zombie is never presented as killable; the recommendation names the
+    parent that must reap it.
+    """
+    zombies = data.get("zombies") or []
+    orphans = data.get("orphans") or []
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column(justify="right", style="aios.dim")
+    grid.add_column()
+    grid.add_row("scanned", Text(str(data.get("total_scanned", 0))))
+    grid.add_row(
+        "zombies",
+        Text(str(len(zombies)), style="bold red" if zombies else "aios.dim"),
+    )
+    grid.add_row("orphans", Text(str(len(orphans))))
+
+    def findings(rows: list[dict[str, Any]], title: str) -> Table | Panel:
+        if not rows:
+            return Panel(Text("None.", style="aios.dim"), title=title, title_align="left")
+        table = _table(title=title)
+        for column, justify in (
+            ("PID", "right"),
+            ("PPID", "right"),
+            ("NAME", "left"),
+            ("PARENT", "left"),
+            ("REASON", "left"),
+        ):
+            table.add_column(column, justify=justify, no_wrap=(column != "REASON"))
+        for row in rows:
+            table.add_row(
+                Text(str(row.get("pid", "-"))),
+                Text(str(row.get("ppid", "-"))),
+                _text(row.get("name"), max_length=24),
+                _text(row.get("parent_name") or "-", max_length=24),
+                _text(row.get("recommendation") or row.get("reason"), max_length=80),
+            )
+        return table
+
+    body = Group(
+        grid,
+        Text(""),
+        findings(zombies, "Zombies · parent must reap"),
+        findings(orphans, "Orphans · alive and reparented"),
+    )
+    return Panel(body, title="Process diagnosis", title_align="left", border_style="aios.panel")
+
+
 def render_network(data: dict[str, Any], *, listening_only: bool = False) -> Table | Panel:
     connections = data.get("connections", []) or []
     if not connections:
@@ -927,6 +976,7 @@ __all__ = [
     "render_audit",
     "render_confirmation",
     "render_cpu",
+    "render_diagnose",
     "render_error",
     "render_history",
     "render_memory",

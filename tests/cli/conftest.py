@@ -73,6 +73,33 @@ NETWORK = {
     ],
 }
 
+DIAGNOSE = {
+    "generated_at": "2026-11-15T10:00:00Z",
+    "total_scanned": 120,
+    "zombies": [
+        {
+            "pid": 999,
+            "ppid": 1,
+            "name": "defunct",
+            "parent_name": "systemd",
+            "reason": "zombie",
+            "recommendation": "parent must reap pid 999",
+        }
+    ],
+    "orphans": [],
+    "top_cpu": [],
+    "top_memory": [],
+    "notes": [],
+}
+
+NETWORK_STATUS = {
+    "generated_at": "2026-11-15T10:00:00Z",
+    "interfaces": [],
+    "default_interface": "wlp0s20f3",
+    "default_gateway": "192.168.1.1",
+    "notes": [],
+}
+
 HEALTH = {
     "status": "ok",
     "version": "0.7.0",
@@ -125,6 +152,8 @@ class FakeClient:
         self.confirm_verdict = kwargs.get("confirm_verdict")
         self.plan_payload = kwargs.get("plan_payload")
         self.apply_verdict = kwargs.get("apply_verdict")
+        self.diagnose_data = kwargs.get("diagnose", DIAGNOSE)
+        self.network_status_data = kwargs.get("network_status", NETWORK_STATUS)
         self.schema_data = kwargs.get("schema", SCHEMA)
         self.calls: list[tuple[str, Any]] = []
 
@@ -137,7 +166,9 @@ class FakeClient:
             "system.cpu": self.cpu_data,
             "system.memory": self.memory_data,
             "process.list": self.processes_data,
+            "process.diagnose": self.diagnose_data,
             "network.connections": self.network_data,
+            "network.status": self.network_status_data,
         }[action]
 
     def status(self) -> dict[str, Any]:
@@ -156,24 +187,10 @@ class FakeClient:
         return self.network_data
 
     def diagnose(self, *, limit: int = 200, include_orphans: bool = True, top_n: int = 5):
-        return {
-            "generated_at": "2026-11-15T10:00:00Z",
-            "total_scanned": 2,
-            "zombies": [],
-            "orphans": [],
-            "top_cpu": [],
-            "top_memory": [],
-            "notes": [],
-        }
+        return self.diagnose_data
 
     def network_status(self) -> dict[str, Any]:
-        return {
-            "generated_at": "2026-11-15T10:00:00Z",
-            "interfaces": [],
-            "default_interface": None,
-            "default_gateway": None,
-            "notes": [],
-        }
+        return self.network_status_data
 
     def health(self) -> dict[str, Any]:
         return self.health_data

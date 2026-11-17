@@ -22,6 +22,7 @@ from aios.cli.ui.render import (
     render_actions,
     render_audit,
     render_cpu,
+    render_diagnose,
     render_error,
     render_memory,
     render_network,
@@ -227,6 +228,28 @@ def processes(
             limit=limit, sort_by=sort, name_filter=name_filter or None
         ),
         render=lambda payload: render_processes(payload, sort_by=sort, name_filter=name_filter),
+    )
+
+
+@app.command()
+@guarded
+def diagnose(
+    limit: int = typer.Option(200, "--limit", min=1, max=5000, help="Orphan rows to cap."),
+    top: int = typer.Option(5, "--top", min=0, max=50, help="Top CPU/memory rows."),
+    orphans: bool = typer.Option(True, "--orphans/--no-orphans", help="Include orphans."),
+) -> None:
+    """Diagnose zombies, orphans, and top CPU/memory processes.
+
+    A zombie is already dead and cannot be signalled; the parent must reap it.
+
+    Example: aios diagnose
+    """
+    state = get_state()
+    run_view(
+        state,
+        label="diagnosing processes…",
+        fetch=lambda: state.client.diagnose(limit=limit, include_orphans=orphans, top_n=top),
+        render=render_diagnose,
     )
 
 

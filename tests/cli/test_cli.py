@@ -527,9 +527,7 @@ def test_assistant_zombie_plan_refusal_is_truthful(provider, monkeypatch):
 
     fake = ZombieClient(schema=PLAN_SCHEMA)
     provider.responses = [
-        json.dumps(
-            {"action": "process.signal", "params": {"pid": 4242, "signal": "KILL"}}
-        )
+        json.dumps({"action": "process.signal", "params": {"pid": 4242, "signal": "KILL"}})
     ]
     monkeypatch.setattr(assistant_module.Confirm, "ask", staticmethod(lambda *a, **k: True))
     use(fake)
@@ -568,3 +566,22 @@ def test_apply_command_sends_the_exact_hash(runner, fake_client) -> None:
     )
     assert result.exit_code == 0
     assert ("apply_plan", ("plan-test", "sha256:test", "step-1", None)) in fake_client.calls
+
+
+def test_diagnose_json_lists_zombies_without_a_kill_path(runner, fake_client) -> None:
+    use(fake_client, json_output=True)
+    result = runner.invoke(app, ["diagnose", "--top", "3"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["total_scanned"] == 120
+    assert payload["zombies"][0]["pid"] == 999
+    assert "recommendation" in payload["zombies"][0]
+
+
+def test_diagnose_panel_names_the_parent_that_must_reap(runner, fake_client) -> None:
+    use(fake_client)
+    result = runner.invoke(app, ["diagnose"])
+    assert result.exit_code == 0
+    assert "Zombies" in result.output
+    assert "parent must reap" in result.output
+    assert "systemd" in result.output
