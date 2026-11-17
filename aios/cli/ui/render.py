@@ -8,6 +8,7 @@ tables; untrusted strings are never interpolated into Rich markup.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from rich import box
@@ -210,7 +211,28 @@ def _bar_line(
     return grid
 
 
+def _local_datetime(value: Any) -> datetime | None:
+    """Parse an API timestamp and convert it to the operator's local zone."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone()
+
+
 def _timestamp(value: Any, *, time_only: bool = False) -> Text:
+    local = _local_datetime(value)
+    if local is not None:
+        text = local.strftime("%H:%M:%S" if time_only else "%m-%d %H:%M:%S")
+        return Text(text, style="aios.dim")
+    # Unknown shapes stay visible verbatim, minus control characters.
     text = sanitize_inline(value, max_length=32)
     if "T" in text:
         text = text.replace("T", " ", 1)
@@ -533,9 +555,13 @@ def _audit_table(
         table.add_column("STATE", no_wrap=True, max_width=10)
     table.add_column("REASON", overflow="ellipsis", max_width=16 if compact else 18, no_wrap=True)
     table.add_column("TIME", no_wrap=True)
-    dates = {sanitize_inline(entry.get("at"), max_length=32)[:10] for entry in entries}
+    dates = {
+        local.date().isoformat()
+        for entry in entries
+        if (local := _local_datetime(entry.get("at"))) is not None
+    }
     single_date = dates.pop() if len(dates) == 1 else ""
-    if len(single_date) == 10 and single_date[4] == "-":
+    if single_date:
         table.title = f"{title} · {single_date}"
     for entry in entries:
         denial = entry.get("denial_reason")

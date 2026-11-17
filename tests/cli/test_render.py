@@ -303,8 +303,22 @@ def test_audit_table_renders_decision_badges() -> None:
     assert "ALLOW" in output
     assert "DENY" in output
     assert "capability_missing" in output
+
+
+def test_audit_times_are_shown_in_local_time(monkeypatch) -> None:
+    import time
+
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    try:
+        output = render_text(render_audit(audit_entries()))
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+    # 10:00 UTC is 15:30 in Asia/Kolkata, on the same local day.
     assert "Audit · 2026-11-15" in output
-    assert "10:00:00" in output
+    assert "15:30:00" in output
+    assert "10:00:00" not in output
 
 
 def test_audit_denied_filter_keeps_only_denials() -> None:
