@@ -67,9 +67,42 @@ DENIAL_TEXT = {
 }
 
 
+SHORT_DENIAL = {
+    "not_in_protocol": "not in protocol",
+    "forbidden_action": "forbidden",
+    "invalid_params": "invalid params",
+    "scope_mismatch": "scope mismatch",
+    "capability_missing": "no capability",
+    "capability_revoked": "grant revoked",
+    "capability_expired": "grant expired",
+    "risk_too_high": "risk too high",
+    "policy_deny": "policy deny",
+    "policy_unavailable": "policy down",
+    "gateway_refused": "gateway refused",
+    "gateway_error": "gateway error",
+    "confirmation_required": "needs approval",
+    "plan_required": "plan required",
+    "approval_invalid": "approval invalid",
+    "approval_expired": "approval expired",
+    "plan_mismatch": "plan changed",
+    "target_changed": "target changed",
+    "executor_refused": "executor refused",
+    "limit_exceeded": "limit exceeded",
+    "plan_replayed": "plan replayed",
+    "cross_device": "cross-device move",
+    "internal_error": "internal error",
+}
+
+
 def denial_explanation(code: object) -> str:
     key = str(code or "").strip()
     return DENIAL_TEXT.get(key, "Denied by policy for an unspecified reason.")
+
+
+def short_denial(code: object) -> str:
+    """A table-sized label for a denial code."""
+    key = str(code or "").strip()
+    return SHORT_DENIAL.get(key, key or "-")
 
 
 # --- small helpers ---------------------------------------------------------
@@ -482,7 +515,9 @@ def _address(host: Any, port: Any) -> str:
 # --- audit and security ----------------------------------------------------
 
 
-def _audit_table(entries: list[dict[str, Any]], *, title: str) -> Table | Panel:
+def _audit_table(
+    entries: list[dict[str, Any]], *, title: str, compact: bool = False
+) -> Table | Panel:
     if not entries:
         return Panel(
             Text("No audit entries.", style="aios.dim"),
@@ -491,12 +526,12 @@ def _audit_table(entries: list[dict[str, Any]], *, title: str) -> Table | Panel:
             title_align="left",
         )
     table = _table(title=title)
-    table.add_column("ACTION ID", no_wrap=True)
-    table.add_column("ACTION", no_wrap=True)
+    table.add_column("ACTION", no_wrap=True, max_width=18 if compact else 20)
     table.add_column("RISK", no_wrap=True)
     table.add_column("DECISION", no_wrap=True)
-    table.add_column("STATE", no_wrap=True)
-    table.add_column("DENIAL", overflow="ellipsis")
+    if not compact:
+        table.add_column("STATE", no_wrap=True, max_width=10)
+    table.add_column("REASON", overflow="ellipsis", max_width=16 if compact else 18, no_wrap=True)
     table.add_column("TIME", no_wrap=True)
     dates = {sanitize_inline(entry.get("at"), max_length=32)[:10] for entry in entries}
     single_date = dates.pop() if len(dates) == 1 else ""
@@ -504,15 +539,17 @@ def _audit_table(entries: list[dict[str, Any]], *, title: str) -> Table | Panel:
         table.title = f"{title} · {single_date}"
     for entry in entries:
         denial = entry.get("denial_reason")
-        table.add_row(
-            Text(sanitize_inline(entry.get("action_id"), max_length=18)),
-            _text(entry.get("action"), max_length=24),
+        reason = short_denial(denial) if compact else (denial if denial else "-")
+        row = [
+            _text(entry.get("action"), max_length=18 if compact else 20),
             risk_badge(entry.get("risk")),
             decision_badge(entry.get("decision")),
-            state_badge(entry.get("state")),
-            _text(denial if denial else "-", max_length=32),
-            _timestamp(entry.get("at"), time_only=bool(single_date)),
-        )
+        ]
+        if not compact:
+            row.append(state_badge(entry.get("state")))
+        row.append(_text(reason, max_length=16 if compact else 18))
+        row.append(_timestamp(entry.get("at"), time_only=bool(single_date)))
+        table.add_row(*row)
     return table
 
 
@@ -558,7 +595,7 @@ def render_security(summary: dict[str, Any]) -> Panel:
     )
     grid.add_row("services", _services_line(services))
     last_events = summary.get("last_events", []) or []
-    event_table = _audit_table(last_events[-8:], title="Last events")
+    event_table = _audit_table(last_events[-8:], title="Last events", compact=True)
     return Panel(
         Group(grid, Text(""), event_table),
         title="Security",
@@ -720,6 +757,48 @@ def render_error(message: object, *, next_step: object | None = None) -> Panel:
     return Panel(body, title="Error", title_align="left", border_style="red")
 
 
+def render_history(turns: list[dict[str, Any]]) -> Table | Panel:
+    if not turns:
+        return Panel(
+            Text("No turns in this session yet.", style="aios.dim"),
+            title="History",
+            title_align="left",
+            border_style="aios.panel",
+        )
+    table = _table(title="History", caption=f"{len(turns)} turns")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("QUESTION", overflow="fold")
+    table.add_column("DECISION", no_wrap=True)
+    table.add_column("ANSWER", overflow="fold")
+    for index, turn in enumerate(turns, start=1):
+        table.add_row(
+            Text(str(index)),
+            _text(turn.get("question"), max_length=120),
+            decision_badge(turn.get("decision")),
+            _text(turn.get("answer"), max_length=160),
+        )
+    return table
+
+
+def render_session(
+    *,
+    session_id: object,
+    model: object,
+    health: object,
+    trust: object,
+    turns: int,
+) -> Panel:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="aios.dim")
+    grid.add_column(overflow="fold")
+    grid.add_row("session", _text(session_id, max_length=48))
+    grid.add_row("model", _text(model, max_length=64))
+    grid.add_row("health", _text(health, max_length=120))
+    grid.add_row("trust", _text(trust, max_length=64))
+    grid.add_row("turns", Text(str(turns)))
+    return Panel(grid, title="Session", title_align="left", border_style="aios.panel")
+
+
 __all__ = [
     "denial_explanation",
     "render_actions",
@@ -728,12 +807,14 @@ __all__ = [
     "render_confirmation",
     "render_cpu",
     "render_error",
+    "render_history",
     "render_memory",
     "render_network",
     "render_processes",
     "render_proposal",
     "render_result",
     "render_security",
+    "render_session",
     "render_status",
     "render_thinking",
     "render_verdict",

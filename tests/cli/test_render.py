@@ -299,7 +299,7 @@ def audit_entries() -> list[dict[str, Any]]:
 def test_audit_table_renders_decision_badges() -> None:
     output = render_text(render_audit(audit_entries()))
     assert "Audit" in output
-    assert "act-allow" in output
+    assert "filesystem.read" in output
     assert "ALLOW" in output
     assert "DENY" in output
     assert "capability_missing" in output
@@ -309,15 +309,15 @@ def test_audit_table_renders_decision_badges() -> None:
 
 def test_audit_denied_filter_keeps_only_denials() -> None:
     output = render_text(render_audit(audit_entries(), denied_only=True))
-    assert "act-deny" in output
-    assert "act-allow" not in output
+    assert "process.kill" in output
+    assert "filesystem.read" not in output
 
 
 def test_actions_view_without_filter_lists_decided_actions() -> None:
     output = render_text(render_actions(audit_entries()))
     assert "Actions" in output
-    assert "act-allow" in output
-    assert "act-deny" in output
+    assert "filesystem.read" in output
+    assert "process.kill" in output
 
 
 def test_security_summary_shows_counts_and_last_events() -> None:
