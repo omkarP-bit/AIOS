@@ -82,6 +82,19 @@ decision := {
 } if {
   deny_reason == ""
   input.risk == "MEDIUM"
+  not input.operator_confirmed
+}
+
+decision := {
+  "decision": "ALLOW",
+  "reason": "operator confirmed medium-risk action",
+  "policy_id": "aios.authz.allow-confirmed",
+  "owasp_tags": owasp_tags,
+} if {
+  deny_reason == ""
+  input.risk == "MEDIUM"
+  approval_class == "confirm"
+  input.operator_confirmed == true
 }
 
 decision := {

@@ -100,6 +100,7 @@ func Doc(req *protocol.Request, check *capability.Check, p *plan.Plan, grant *pl
 		"requested_scope": req.RequestedScope,
 		"intent":          req.Intent,
 		"plan":            planDoc, "approval": approvalDoc,
+		"operator_confirmed": req.OperatorConfirmed,
 	}
 }
 
@@ -150,6 +151,23 @@ func defaultPolicyDir() string {
 		dir = filepath.Dir(dir)
 	}
 	return filepath.Join(wd, "aios", "policies")
+}
+
+// Healthy probes the policy binary and directory with a trivial evaluation.
+// It is used by /health so an operator can see that policy is actually
+// available; callers must still treat a failed evaluation as DENY.
+func (r *Rego) Healthy() error {
+	if r == nil || r.Binary == "" {
+		return errors.New("OPA binary not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.Timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, r.Binary, "eval", "--format=json",
+		"--data", r.PolicyDir, "true")
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Evaluate runs one policy query.

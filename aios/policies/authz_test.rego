@@ -15,12 +15,32 @@ test_low_risk_is_allowed if {
   decision.decision == "ALLOW" with input as low_input
 }
 
+medium_input := object.union(low_input, {
+  "action": "filesystem.read",
+  "risk": "MEDIUM",
+  "capability": {"allowed": true, "matched": "filesystem.read:/tmp/*", "target_in_scope": true},
+})
+
 test_medium_risk_requires_confirmation if {
-  decision.decision == "CONFIRM" with input as object.union(low_input, {
-    "action": "filesystem.read",
-    "risk": "MEDIUM",
-    "capability": {"allowed": true, "matched": "filesystem.read:/tmp/*", "target_in_scope": true},
-  })
+  decision.decision == "CONFIRM" with input as medium_input
+}
+
+test_confirmed_medium_risk_is_allowed if {
+  confirmed := object.union(medium_input, {"operator_confirmed": true})
+  decision.decision == "ALLOW" with input as confirmed
+  decision.policy_id == "aios.authz.allow-confirmed" with input as confirmed
+}
+
+test_confirmed_low_risk_keeps_the_low_rule if {
+  confirmed := object.union(low_input, {"operator_confirmed": true})
+  decision.decision == "ALLOW" with input as confirmed
+  decision.policy_id == "aios.authz.allow-low" with input as confirmed
+}
+
+test_confirmation_cannot_approve_a_plan_action if {
+  confirmed := object.union(object.remove(high_input, ["approval"]), {"operator_confirmed": true})
+  decision.decision == "DENY" with input as confirmed
+  decision.reason == "approval_required" with input as confirmed
 }
 
 test_forbidden_action_is_denied if {

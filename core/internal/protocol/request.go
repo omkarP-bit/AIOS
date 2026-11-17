@@ -116,6 +116,9 @@ type Request struct {
 	RequestedScope map[string]any
 	Origin         Origin
 	Trust          TrustDomain
+	// OperatorConfirmed is set only by the local confirm endpoint after the
+	// operator approved this exact request. It is never read from the wire.
+	OperatorConfirmed bool
 }
 
 // Params is implemented by each typed parameter object.
