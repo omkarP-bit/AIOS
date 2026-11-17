@@ -498,3 +498,23 @@ def test_groq_rate_limit_hint_suggests_lowering_the_token_cap() -> None:
     )
     assert "rate-limited" in (error.next_step or "")
     assert "AIOS_GROQ_MAX_TOKENS" in (error.next_step or "")
+
+
+def test_snapshot_survives_the_cli_client_error_type() -> None:
+    """The CLI passes CoreClient, which raises CliError, not ControlError.
+
+    A stale core answers /processes/diagnose with 400 and /network/status with
+    404; either must omit the optional section instead of failing the ask.
+    """
+    from aios.cli.errors import CliError
+
+    class CliCore(FakeClient):
+        def observe(self, action, params=None):
+            if action in {"process.diagnose", "network.status"}:
+                raise CliError(f"The AIOS core rejected {action}")
+            return super().observe(action, params)
+
+    snapshot = build_snapshot(CliCore())
+    assert "diagnosis" not in snapshot
+    assert "default_interface" not in snapshot["network"]
+    assert snapshot["host"]["hostname"] == "aios-fixture"

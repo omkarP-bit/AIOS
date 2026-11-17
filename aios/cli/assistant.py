@@ -153,7 +153,7 @@ class Assistant:
             raise
         except Exception as exc:  # the snapshot is best-effort, not security
             raise CliError(
-                f"Could not build the local observation context ({type(exc).__name__}).",
+                f"Could not build the local observation context: {exc}",
                 next_step="Run `aios status` to check the core.",
             ) from exc
 
