@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"crypto/rand"
+	"time"
 
 	"aios/internal/actions"
 	"aios/internal/capability"
@@ -11,26 +12,44 @@ import (
 	"aios/internal/engine"
 	"aios/internal/gateway"
 	"aios/internal/ledger"
+	"aios/internal/netctl"
 	"aios/internal/plan"
 	"aios/internal/policy"
 )
+
+// PlanTTL is how long a core-built plan may wait for approval.
+const PlanTTL = 10 * time.Minute
 
 // Runtime is one wired AIOS core.
 type Runtime struct {
 	Settings     config.Settings
 	Gateway      *gateway.Gateway
-	Executor     *actions.QuarantineExecutor
+	Executor     actions.Executor
 	Capabilities *capability.Manager
 	Policy       policy.Engine
 	Ledger       *ledger.Ledger
 	Engine       *engine.Engine
+	Plans        *plan.Registry
+	Network      *netctl.Manager
 }
 
-// New builds the read-only gateway, the separate mutation executor, policy,
-// and the audit sink.
+// New builds the read-only gateway, the mutation dispatcher, policy, the plan
+// registry, and the audit sink.
 func New(settings config.Settings) (*Runtime, error) {
 	gw := gateway.New(settings.ProcRoot, settings.SysRoot, settings.QuarantineDir)
-	executor, err := actions.NewQuarantineExecutor(settings.QuarantineDir)
+
+	// NetworkManager is optional: without the system bus the read-only
+	// network views still work and network.prefer fails closed with a
+	// backend_unavailable denial instead of taking down the whole core.
+	var controller actions.NetworkController
+	networkManager, err := netctl.Open()
+	if err == nil {
+		controller = networkManager
+	} else {
+		networkManager = nil
+	}
+
+	executor, err := actions.NewDispatcher(settings.QuarantineDir, settings.ProcRoot, controller)
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +61,7 @@ func New(settings config.Settings) (*Runtime, error) {
 	rt := &Runtime{
 		Settings: settings, Gateway: gw, Executor: executor,
 		Capabilities: capability.NewManager(), Policy: p, Ledger: audit,
+		Plans: plan.NewRegistry(PlanTTL), Network: networkManager,
 	}
 	rt.Engine = engine.New(gw, executor, rt.Capabilities, p, audit)
 	return rt, nil

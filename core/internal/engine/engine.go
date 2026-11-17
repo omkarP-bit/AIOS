@@ -46,6 +46,9 @@ const (
 	LimitExceeded        DenialReason = "limit_exceeded"
 	PlanReplayed         DenialReason = "plan_replayed"
 	CrossDevice          DenialReason = "cross_device"
+	NotPermitted         DenialReason = "not_permitted"
+	ZombieNotKillable    DenialReason = "zombie_not_killable"
+	BackendUnavailable   DenialReason = "backend_unavailable"
 	InternalError        DenialReason = "internal_error"
 )
 
@@ -81,7 +84,7 @@ type Verdict struct {
 // Engine validates, authorizes, and executes.
 type Engine struct {
 	Gateway      *gateway.Gateway
-	Executor     *actions.QuarantineExecutor
+	Executor     actions.Executor
 	Capabilities *capability.Manager
 	Policy       policy.Engine
 	Ledger       *ledger.Ledger
@@ -89,7 +92,7 @@ type Engine struct {
 }
 
 // New builds an engine with deny-by-default capabilities and the Rego policy.
-func New(gw *gateway.Gateway, executor *actions.QuarantineExecutor, capabilities *capability.Manager, policyEngine policy.Engine, audit *ledger.Ledger) *Engine {
+func New(gw *gateway.Gateway, executor actions.Executor, capabilities *capability.Manager, policyEngine policy.Engine, audit *ledger.Ledger) *Engine {
 	if capabilities == nil {
 		capabilities = capability.NewManager()
 	}
@@ -207,7 +210,7 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 			policy.Allow, "mutation completed", &check, &durationMS, nil, nil)
 		actionResult := &ActionResult{
 			ActionID: req.ActionID, State: string(protocol.StateCompleted),
-			Success: true, Data: step, Source: "executor:quarantine",
+			Success: true, Data: step, Source: "executor:" + name,
 			TrustDomain: "T1", DurationMS: durationMS,
 		}
 		return Verdict{
@@ -346,6 +349,12 @@ func mapExecutorReason(reason string) DenialReason {
 		return CrossDevice
 	case "limit_exceeded":
 		return LimitExceeded
+	case "not_permitted":
+		return NotPermitted
+	case "zombie_not_killable":
+		return ZombieNotKillable
+	case "network_backend_unavailable":
+		return BackendUnavailable
 	case "executor_unavailable":
 		return ExecutorRefused
 	default:

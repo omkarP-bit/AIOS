@@ -62,7 +62,9 @@ func DefaultCapabilities() []Capability {
 		{Action: "system.status", Reason: "system visibility", GrantedBy: "capability-manager"},
 		{Action: "system.uptime", Reason: "system visibility", GrantedBy: "capability-manager"},
 		{Action: "process.list", Reason: "process visibility", GrantedBy: "capability-manager"},
+		{Action: "process.diagnose", Reason: "process visibility", GrantedBy: "capability-manager"},
 		{Action: "network.connections", Reason: "network visibility", GrantedBy: "capability-manager"},
+		{Action: "network.status", Reason: "network visibility", GrantedBy: "capability-manager"},
 	}
 }
 
@@ -234,6 +236,10 @@ func (m *Manager) Check(agentID, action, target string, now time.Time) Check {
 			if PIDInScope(uid, cap.Scope) {
 				result.Allowed = true
 			}
+		case "connection":
+			if ConnectionInScope(target, cap.Scope) {
+				result.Allowed = true
+			}
 		}
 		if result.Allowed {
 			result.Reason = "target is within capability scope"
@@ -365,4 +371,15 @@ func PIDInScope(pid int, patterns []string) bool {
 // UIDInScope is PIDInScope for numeric uids.
 func UIDInScope(uid int, patterns []string) bool {
 	return PIDInScope(uid, patterns)
+}
+
+// ConnectionInScope matches a NetworkManager connection UUID or id exactly.
+// There is no wildcard: a grant names one connection.
+func ConnectionInScope(target string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if strings.TrimSpace(pattern) == target {
+			return true
+		}
+	}
+	return false
 }

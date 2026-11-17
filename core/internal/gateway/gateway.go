@@ -187,6 +187,17 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 		}
 		return envelope(fmt.Sprintf("procfs:%s/%d", g.ProcRoot, p.PID), "gateway", "T2", name, info), nil
 
+	case "process.diagnose":
+		p, ok := req.Typed.(*protocol.ProcessDiagnoseParams)
+		if !ok {
+			return nil, fail("invalid process diagnosis params")
+		}
+		info, err := observe.DiagnoseProcesses(g.ProcRoot, p.Limit, p.UIDFilter, p.IncludeOrphans, p.TopN)
+		if err != nil {
+			return nil, fail("cannot diagnose processes: %v", err)
+		}
+		return envelope("procfs:"+g.ProcRoot+"/<pid>/stat", "gateway", "T2", name, info), nil
+
 	case "network.connections":
 		p, ok := req.Typed.(*protocol.NetworkConnectionsParams)
 		if !ok {
@@ -197,6 +208,17 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 			return nil, fail("cannot read network: %v", err)
 		}
 		return envelope("procfs:"+g.ProcRoot+"/net", "gateway", "T2", name, result), nil
+
+	case "network.status":
+		p, ok := req.Typed.(*protocol.NetworkStatusParams)
+		if !ok {
+			return nil, fail("invalid network status params")
+		}
+		result, err := observe.ReadNetworkStatus(g.ProcRoot, g.SysRoot, p.IncludeWireless, p.IncludeLinkSpeed)
+		if err != nil {
+			return nil, fail("cannot read network status: %v", err)
+		}
+		return envelope("sysfs:"+g.SysRoot+"/class/net", "gateway", "T2", name, result), nil
 
 	case "filesystem.list":
 		p, ok := req.Typed.(*protocol.FilesystemListParams)

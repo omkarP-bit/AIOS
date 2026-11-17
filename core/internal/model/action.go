@@ -50,13 +50,17 @@ type QuarantineRecord struct {
 
 // StepResult is the per-step outcome of an executor run.
 type StepResult struct {
-	Action         string  `json:"action"`
-	CandidateID    string  `json:"candidate_id"`
-	Path           string  `json:"path"`
-	Status         string  `json:"status"`
-	Detail         *string `json:"detail"`
-	QuarantinePath *string `json:"quarantine_path"`
-	BytesMoved     int64   `json:"bytes_moved"`
+	Action         string         `json:"action"`
+	CandidateID    string         `json:"candidate_id"`
+	Path           string         `json:"path"`
+	Status         string         `json:"status"`
+	Detail         *string        `json:"detail"`
+	QuarantinePath *string        `json:"quarantine_path"`
+	BytesMoved     int64          `json:"bytes_moved"`
+	Target         string         `json:"target,omitempty"`
+	PID            int            `json:"pid,omitempty"`
+	Signal         string         `json:"signal,omitempty"`
+	Data           map[string]any `json:"data,omitempty"`
 }
 
 // ExecutionResult is the executor's report for one plan.

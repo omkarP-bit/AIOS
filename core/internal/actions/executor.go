@@ -27,6 +27,55 @@ func refuse(reason, format string, args ...any) ExecutorError {
 	return ExecutorError{Message: fmt.Sprintf(format, args...), Reason: reason}
 }
 
+// Executor runs one approved step for the action it serves.
+type Executor interface {
+	Execute(req *protocol.Request, p plan.Plan, grant plan.Grant) (model.StepResult, error)
+}
+
+// Dispatcher routes each approved step to its action family executor. It is
+// the only mutation entry point the engine sees.
+type Dispatcher struct {
+	Quarantine *QuarantineExecutor
+	Process    *ProcessExecutor
+	Network    *NetworkExecutor
+}
+
+// NewDispatcher builds the mutation executors for this host.
+func NewDispatcher(quarantineDir, procRoot string, network NetworkController) (*Dispatcher, error) {
+	quarantine, err := NewQuarantineExecutor(quarantineDir)
+	if err != nil {
+		return nil, err
+	}
+	return &Dispatcher{
+		Quarantine: quarantine,
+		Process:    NewProcessExecutor(procRoot),
+		Network:    &NetworkExecutor{Controller: network},
+	}, nil
+}
+
+// Execute dispatches by action name.
+func (d *Dispatcher) Execute(req *protocol.Request, p plan.Plan, grant plan.Grant) (model.StepResult, error) {
+	switch req.ActionName() {
+	case "filesystem.quarantine", "filesystem.restore":
+		if d.Quarantine == nil {
+			return model.StepResult{}, refuse("executor_unavailable", "quarantine executor is not configured")
+		}
+		return d.Quarantine.Execute(req, p, grant)
+	case "process.signal":
+		if d.Process == nil {
+			return model.StepResult{}, refuse("executor_unavailable", "process executor is not configured")
+		}
+		return d.Process.Execute(req, p, grant)
+	case "network.prefer":
+		if d.Network == nil {
+			return model.StepResult{}, refuse("executor_unavailable", "network executor is not configured")
+		}
+		return d.Network.Execute(req, p, grant)
+	default:
+		return model.StepResult{}, refuse("executor_refused", "%s is not a mutation action", req.ActionName())
+	}
+}
+
 // QuarantineExecutor is the only component that may move a candidate.
 type QuarantineExecutor struct {
 	Dir string
@@ -298,9 +347,9 @@ func underRoot(path string, roots []string) bool {
 	return false
 }
 
-// ExecutorActions is the fixed set this executor serves.
+// ExecutorActions is the fixed set the dispatcher serves.
 func ExecutorActions() []string {
-	return []string{"filesystem.quarantine", "filesystem.restore"}
+	return []string{"filesystem.quarantine", "filesystem.restore", "process.signal", "network.prefer"}
 }
 
 var errRenameUnavailable = errors.New("renameat2 is not available on this platform")

@@ -15,6 +15,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"aios/internal/model"
 )
 
 const (
@@ -648,4 +651,182 @@ func procDerefInt64(value *int64) int64 {
 		return 0
 	}
 	return *value
+}
+
+// ProcessIdentity is the immutable-ish identity captured in a process plan.
+// StartTicks comes from /proc/<pid>/stat field 22 and, together with the pid,
+// closes the PID-reuse window: a reused pid has a different start time.
+type ProcessIdentity struct {
+	PID          int     `json:"pid"`
+	PPID         int     `json:"ppid"`
+	Name         string  `json:"name"`
+	State        string  `json:"state"`
+	UID          int     `json:"uid"`
+	StartTicks   int64   `json:"start_ticks"`
+	StartTimeUTC *string `json:"start_time_utc"`
+	Executable   *string `json:"executable"`
+}
+
+// ReadProcessIdentity captures the identity fields a signal plan binds to.
+// Unlike ReadProcessInspect it accepts zombies: diagnosing them is the point.
+func ReadProcessIdentity(procRoot string, pid int) (ProcessIdentity, error) {
+	if pid <= 0 {
+		return ProcessIdentity{}, &ProcessNotFoundError{PID: pid, Reason: "invalid pid"}
+	}
+	base := filepath.Join(procRoot, strconv.Itoa(pid))
+	statText, err := procReadLimited(filepath.Join(base, "stat"), 8192)
+	if err != nil {
+		return ProcessIdentity{}, &ProcessNotFoundError{PID: pid, Reason: err.Error()}
+	}
+	stat, err := procParseStat(statText)
+	if err != nil {
+		return ProcessIdentity{}, &ProcessNotFoundError{PID: pid, Reason: err.Error()}
+	}
+	if stat.Starttime == nil {
+		return ProcessIdentity{}, &ProcessNotFoundError{PID: pid, Reason: "start time is unavailable"}
+	}
+	var status procStatus
+	if statusText, err := procReadLimited(filepath.Join(base, "status"), 32768); err == nil {
+		status = procParseStatus(statusText)
+	}
+	identity := ProcessIdentity{
+		PID: pid, PPID: stat.PPID, Name: stat.Comm, State: stat.State,
+		StartTicks: *stat.Starttime,
+	}
+	if status.UID != nil {
+		identity.UID = *status.UID
+	}
+	if uptime, ok := procReadUptime(procRoot); ok {
+		started := time.Now().Add(-time.Duration((uptime - float64(*stat.Starttime)/procClkTck) * float64(time.Second)))
+		text := started.UTC().Truncate(time.Second).Format(time.RFC3339)
+		identity.StartTimeUTC = &text
+	}
+	if raw, err := procReadLimited(filepath.Join(base, "cmdline"), 131072); err == nil {
+		cmdline := procParseCmdline(raw)
+		if len(cmdline) > 0 {
+			identity.Executable = procStringPtr(cmdline[0])
+		}
+	}
+	if resolved, err := procResolveLink(filepath.Join(base, "exe")); err == nil {
+		identity.Executable = procStringPtr(resolved)
+	}
+	return identity, nil
+}
+
+// ProcessFinding is one diagnosis row.
+type ProcessFinding struct {
+	PID            int      `json:"pid"`
+	PPID           int      `json:"ppid"`
+	Name           string   `json:"name"`
+	State          string   `json:"state"`
+	StateText      string   `json:"state_description"`
+	UID            *int     `json:"uid"`
+	StartTimeUTC   *string  `json:"start_time_utc"`
+	ElapsedS       *float64 `json:"elapsed_s"`
+	CPUPercent     *float64 `json:"cpu_percent"`
+	RSSBytes       *int64   `json:"rss_bytes"`
+	ParentName     *string  `json:"parent_name"`
+	ParentState    *string  `json:"parent_state"`
+	Reason         string   `json:"reason"`
+	Recommendation string   `json:"recommendation"`
+}
+
+// ProcessDiagnosis is the read-only result of process.diagnose.
+type ProcessDiagnosis struct {
+	GeneratedAt  model.Timestamp  `json:"generated_at"`
+	TotalScanned int              `json:"total_scanned"`
+	Zombies      []ProcessFinding `json:"zombies"`
+	Orphans      []ProcessFinding `json:"orphans"`
+	TopCPU       []ProcessFinding `json:"top_cpu"`
+	TopMemory    []ProcessFinding `json:"top_memory"`
+	Notes        []string         `json:"notes"`
+}
+
+// DiagnoseProcesses classifies zombies and adopted/orphaned processes without
+// changing anything. A zombie has no live identity and cannot be killed; its
+// parent must reap it. An orphan is alive and merely reparented.
+func DiagnoseProcesses(procRoot string, limit int, uidFilter *int, includeOrphans bool, topN int) (ProcessDiagnosis, error) {
+	if limit < 1 {
+		limit = 200
+	}
+	if topN < 0 {
+		topN = 0
+	}
+	snapshot, err := ReadProcessList(procRoot, 5000, "pid", nil, uidFilter, false)
+	if err != nil {
+		return ProcessDiagnosis{}, err
+	}
+	byPID := make(map[int]ProcessInfo, len(snapshot.Processes))
+	for _, info := range snapshot.Processes {
+		byPID[info.PID] = info
+	}
+	diagnosis := ProcessDiagnosis{
+		GeneratedAt:  model.Timestamp{Time: time.Now().UTC().Truncate(time.Microsecond)},
+		TotalScanned: len(snapshot.Processes),
+		Zombies:      []ProcessFinding{},
+		Orphans:      []ProcessFinding{},
+		TopCPU:       []ProcessFinding{},
+		TopMemory:    []ProcessFinding{},
+		Notes: []string{
+			"A zombie is already dead. It cannot be killed; its parent must call wait() or be restarted.",
+			"An orphan has been reparented to init. It is alive, not a zombie, and can be signalled if it is unwanted.",
+			"Signals are limited to processes owned by the core's user.",
+		},
+	}
+	finding := func(info ProcessInfo) ProcessFinding {
+		out := ProcessFinding{
+			PID: info.PID, PPID: info.PPID, Name: info.Name, State: info.State,
+			StateText: info.StateDescription, UID: info.UID,
+			StartTimeUTC: info.StartTimeUTC, ElapsedS: info.ElapsedS,
+			CPUPercent: info.CPUPercent, RSSBytes: info.RSSBytes,
+		}
+		if parent, ok := byPID[info.PPID]; ok {
+			out.ParentName = procStringPtr(parent.Name)
+			out.ParentState = procStringPtr(parent.State)
+		}
+		return out
+	}
+	for _, info := range snapshot.Processes {
+		if info.State == "Z" {
+			row := finding(info)
+			row.Reason = "zombie: the process has exited but its parent has not reaped it"
+			if row.ParentName != nil {
+				row.Recommendation = "parent " + *row.ParentName + " (pid " + strconv.Itoa(info.PPID) + ") must call wait() or be restarted; killing the zombie is not possible"
+			} else {
+				row.Recommendation = "the parent is gone; a service manager or init should reap it"
+			}
+			diagnosis.Zombies = append(diagnosis.Zombies, row)
+			continue
+		}
+		if !includeOrphans || info.PID == 1 {
+			continue
+		}
+		_, parentExists := byPID[info.PPID]
+		if info.PPID == 1 || info.PPID == 0 || !parentExists {
+			row := finding(info)
+			row.Reason = "orphan: reparented to init after its original parent exited"
+			row.Recommendation = "leave it if it is a service; otherwise propose process.signal with its pid"
+			diagnosis.Orphans = append(diagnosis.Orphans, row)
+		}
+	}
+	if len(diagnosis.Orphans) > limit {
+		diagnosis.Orphans = diagnosis.Orphans[:limit]
+	}
+	if topN > 0 {
+		cpu := append([]ProcessInfo(nil), snapshot.Processes...)
+		sort.SliceStable(cpu, func(i, j int) bool {
+			return procDerefFloat(cpu[i].CPUPercent) > procDerefFloat(cpu[j].CPUPercent)
+		})
+		for _, info := range cpu[:min(topN, len(cpu))] {
+			diagnosis.TopCPU = append(diagnosis.TopCPU, finding(info))
+		}
+		mem := append([]ProcessInfo(nil), snapshot.Processes...)
+		sort.SliceStable(mem, func(i, j int) bool {
+			return procDerefInt64(mem[i].RSSBytes) > procDerefInt64(mem[j].RSSBytes)
+		})
+		for _, info := range mem[:min(topN, len(mem))] {
+			diagnosis.TopMemory = append(diagnosis.TopMemory, finding(info))
+		}
+	}
+	return diagnosis, nil
 }
