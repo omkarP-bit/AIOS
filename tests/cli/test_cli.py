@@ -182,6 +182,35 @@ def test_denied_ask_exits_3(runner, fake_client, provider) -> None:
     result = runner.invoke(app, ["ask", "read /etc/shadow"])
     assert result.exit_code == 3
     assert "DENY" in result.output
+    assert "policy denied filesystem.read on /etc/shadow" in result.output
+    assert "nothing was run" in result.output
+
+
+def test_chat_mode_shows_only_the_answer(fake_client, provider, capsys) -> None:
+    import aios.cli.assistant as assistant_module
+    from aios.cli.state import get_state
+
+    provider.responses = [
+        json.dumps({"action": "system.status", "params": {}}),
+        json.dumps({"answer": "Everything looks healthy."}),
+    ]
+    fake_client.verdict = {
+        "decision": "ALLOW",
+        "action": "system.status",
+        "risk": "LOW",
+        "data": {"status": "ok"},
+        "source": "procfs:/proc",
+        "trust_domain": "T2",
+    }
+    use(fake_client)
+    result = assistant_module.Assistant(get_state()).run(
+        "status", execute_allowed=True, show_actions=False
+    )
+    output = capsys.readouterr().out
+    assert result.answer == "Everything looks healthy."
+    assert "PROPOSED BY AI" not in output
+    assert "Result" not in output
+    assert "Thinking / Plan" not in output
 
 
 def test_confirm_not_approved_does_not_execute(runner, fake_client, provider, monkeypatch) -> None:

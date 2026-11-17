@@ -6,7 +6,20 @@ untrusted source (T4). The UI must show the data's trust, never the request's.
 
 from __future__ import annotations
 
-from aios.cli.assistant import data_trust
+from aios.ai.planner import PlanResult
+from aios.ai.protocol import ActionRequest
+from aios.cli.assistant import TurnResult, data_trust, denial_answer
+
+
+def _plan(request: ActionRequest | None = None) -> PlanResult:
+    return PlanResult(
+        request=request,
+        raw="{}",
+        provider="groq",
+        model="test-model",
+        external=True,
+        prompt_hash="hash",
+    )
 
 
 def test_data_trust_prefers_the_observation() -> None:
@@ -20,3 +33,37 @@ def test_data_trust_falls_back_for_older_cores() -> None:
 
 def test_data_trust_is_absent_without_a_verdict_field() -> None:
     assert data_trust({}) is None
+
+
+def test_denial_answer_is_truthful_and_helpful() -> None:
+    verdict = {
+        "decision": "DENY",
+        "action": "filesystem.cleanup_scan",
+        "target": "/",
+        "denial_reason": "capability_missing",
+    }
+    answer = denial_answer(verdict, _plan())
+    assert "policy denied filesystem.cleanup_scan on /" in answer
+    assert "capability_missing" in answer
+    assert "nothing was run" in answer
+    assert "read-only observations" in answer
+    assert "I'll scan" not in answer
+
+
+def test_history_note_keeps_the_concrete_target() -> None:
+    request = ActionRequest(
+        action_id="act-1",
+        agent_id="agent",
+        session_id="session",
+        type="filesystem.cleanup_scan",
+        params={"path": "/", "min_age_days": 7},
+    )
+    result = TurnResult(
+        question="okay scan it",
+        plan=_plan(request),
+        verdict={"decision": "DENY"},
+    )
+    note = result.history_note
+    assert "proposed filesystem.cleanup_scan" in note
+    assert '"path": "/"' in note
+    assert "-> DENY" in note

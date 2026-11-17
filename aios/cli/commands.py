@@ -368,7 +368,7 @@ def chat() -> None:
     """Interactive AI session with history, slash commands, and a toolbar.
 
     Esc+Enter (or Alt+Enter) sends; Ctrl+C cancels; Ctrl+D exits.
-    Slash commands: /help /clear /status /history /audit /actions /session /json /exit
+    Slash commands: /help /clear /status /history /audit /actions /session /details /json /exit
     """
     state = get_state()
     code = run_chat(state)

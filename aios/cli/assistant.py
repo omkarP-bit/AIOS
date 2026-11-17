@@ -38,6 +38,26 @@ def data_trust(verdict: dict[str, Any]) -> object:
     return verdict.get("data_trust") or verdict.get("trust_domain")
 
 
+def denial_answer(verdict: dict[str, Any], plan: PlanResult) -> str:
+    """A truthful reply when the core denies: nothing ran, and what still can.
+
+    The model's prose is discarded here because it often promises to perform
+    the very action the core refused.
+    """
+    action = verdict.get("action")
+    if not action and plan.request is not None:
+        action = plan.request.action_name
+    target = verdict.get("target")
+    reason = verdict.get("denial_reason") or verdict.get("reason") or "denied by policy"
+    what = f"{action} on {target}" if target else str(action or "that action")
+    return (
+        f"I can't do that: policy denied {what} ({reason}), so nothing was run. "
+        "I can still help with read-only observations such as system status, "
+        "memory, processes, or network connections. If you expected this to be "
+        "allowed, the core needs a capability grant for that action and target."
+    )
+
+
 @dataclass
 class TurnResult:
     question: str
@@ -53,6 +73,22 @@ class TurnResult:
     def summary(self) -> str:
         decision = (self.verdict or {}).get("decision", "NO ACTION")
         return f"{self.question} → {decision}"
+
+    @property
+    def history_note(self) -> str:
+        """Compact turn record that keeps concrete params for the next turn."""
+        request = self.plan.request if self.plan is not None else None
+        decision = (self.verdict or {}).get("decision") or "NO ACTION"
+        if request is not None:
+            try:
+                params = json.dumps(request.params, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                params = "{}"
+            note = f"proposed {request.action_name} params={params} -> {decision}"
+        else:
+            note = str(decision)
+        answer = (self.answer or "").strip()
+        return f"{note}. {answer}".strip() if answer else note
 
 
 class Assistant:
@@ -99,6 +135,7 @@ class Assistant:
         verbose: bool | None = None,
         execute_allowed: bool = False,
         render: bool = True,
+        show_actions: bool = True,
     ) -> TurnResult:
         state = self.state
         self._render_blocks = render
@@ -127,14 +164,16 @@ class Assistant:
             return result
 
         result.plan = plan
-        self._print(render_thinking(_plan_dict(plan), verbose=verbose))
+        if show_actions:
+            self._print(render_thinking(_plan_dict(plan), verbose=verbose))
         result.blocks.append("thinking")
 
         if plan.request is None:
             result.answer = plan.answer or plan.reason or "No action was proposed."
             return result
 
-        self._print(render_proposal(plan.request, target=_request_target(plan.request)))
+        if show_actions:
+            self._print(render_proposal(plan.request, target=_request_target(plan.request)))
         result.blocks.append("proposal")
 
         try:
@@ -144,13 +183,14 @@ class Assistant:
             return result
         result.verdict = verdict
         target = verdict.get("target") or _request_target(plan.request)
-        self._print(render_verdict(verdict, target=target))
+        if show_actions:
+            self._print(render_verdict(verdict, target=target))
         result.blocks.append("verdict")
 
         decision = str(verdict.get("decision") or "").upper()
         if decision == "DENY":
             result.denied = True
-            result.answer = plan.answer
+            result.answer = denial_answer(verdict, plan)
             return result
 
         if decision == "CONFIRM":
@@ -178,7 +218,8 @@ class Assistant:
             result.verdict = verdict
             result.confirmed = True
             target = verdict.get("target") or target
-            self._print(render_verdict(verdict, target=target))
+            if show_actions:
+                self._print(render_verdict(verdict, target=target))
             result.blocks.append("confirmed")
 
         elif decision == "ALLOW" and execute_allowed:
@@ -189,24 +230,26 @@ class Assistant:
                 return result
             result.verdict = verdict
             target = verdict.get("target") or target
-            self._print(render_verdict(verdict, target=target))
+            if show_actions:
+                self._print(render_verdict(verdict, target=target))
             result.blocks.append("executed")
 
         verdict = result.verdict or {}
         if verdict.get("decision") == "DENY":
             result.denied = True
-            result.answer = plan.answer
+            result.answer = denial_answer(verdict, plan)
             return result
 
         data = verdict.get("data")
         if data is not None:
-            self._print(
-                render_result(
-                    data,
-                    source=verdict.get("source"),
-                    trust_domain=data_trust(verdict),
+            if show_actions:
+                self._print(
+                    render_result(
+                        data,
+                        source=verdict.get("source"),
+                        trust_domain=data_trust(verdict),
+                    )
                 )
-            )
             result.blocks.append("result")
             try:
                 result.answer = self._answer_with_observation(question, data)

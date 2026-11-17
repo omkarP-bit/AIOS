@@ -38,6 +38,7 @@ Commands handled locally (never sent to the model):
   /audit     recent audit rows
   /actions   recent decisions
   /session   session id, model, service health, trust mode
+  /details   show or hide action, verdict, and result panels
   /json      toggle machine-readable turn output
   /exit      leave the session
 
@@ -63,6 +64,7 @@ class ChatState:
     turns: list[dict[str, Any]] = field(default_factory=list)
     health: ChatHealth = field(default_factory=ChatHealth)
     model: str = "unavailable"
+    details: bool = False
 
 
 def run_chat(state: AppState) -> int:
@@ -98,7 +100,12 @@ def run_chat(state: AppState) -> int:
 
         chat.turns.append({"question": text, "decision": None, "answer": None})
         try:
-            result = assistant.run(text, execute_allowed=True, render=not state.json_output)
+            result = assistant.run(
+                text,
+                execute_allowed=True,
+                render=not state.json_output,
+                show_actions=chat.details or state.verbose,
+            )
         except KeyboardInterrupt:
             state.console.print(Text("cancelled", style="aios.dim"))
             continue
@@ -129,7 +136,7 @@ def run_chat(state: AppState) -> int:
         chat.turns[-1]["decision"] = decision or "NO ACTION"
         chat.turns[-1]["answer"] = result.answer
         assistant.history.append(("user", text))
-        assistant.history.append(("assistant", result.answer or result.summary or "no answer"))
+        assistant.history.append(("assistant", result.history_note))
         _refresh_health(state, chat)
 
 
@@ -218,6 +225,15 @@ def _slash(
         state.console.no_color = state.json_output or state.no_color
         state.console.print(
             Text(f"json output {'on' if state.json_output else 'off'}", style="aios.dim")
+        )
+        return True
+    if command == "/details":
+        chat.details = not chat.details
+        state.console.print(
+            Text(
+                f"action details {'on' if chat.details else 'off'}",
+                style="aios.dim",
+            )
         )
         return True
     if command == "/session":
