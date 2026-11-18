@@ -53,6 +53,7 @@ const (
 	ZombieNotKillable    DenialReason = "zombie_not_killable"
 	BackendUnavailable   DenialReason = "backend_unavailable"
 	AuditUnavailable     DenialReason = "audit_unavailable"
+	InjectionVetoed      DenialReason = "injection_vetoed"
 	InternalError        DenialReason = "internal_error"
 )
 
@@ -110,6 +111,16 @@ func New(gw *gateway.Gateway, executor actions.Executor, capabilities *capabilit
 		Gateway: gw, Executor: executor, Capabilities: capabilities,
 		Policy: policyEngine, Ledger: audit,
 	}
+}
+
+// Veto records a fail-closed denial for a service-level safety veto, such as
+// injection-shaped text in untrusted display fields. The reason is built by
+// the detector from fixed category names, never from the untrusted value. A
+// veto never selects a target, lowers risk, or grants a capability.
+func (e *Engine) Veto(req *protocol.Request, reason string) Verdict {
+	return e.deny(req, protocol.StateValidated, policy.Deny,
+		string(catalog.RiskFor(req.ActionName())), InjectionVetoed, reason,
+		time.Now(), nil, nil)
 }
 
 // Authorize runs every check except execution.

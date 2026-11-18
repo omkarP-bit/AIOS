@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"aios/internal/capability"
+	"aios/internal/injection"
 	"aios/internal/model"
 	"aios/internal/plan"
 	"aios/internal/policy"
@@ -36,16 +37,7 @@ func (s *CleanupService) Find(criteria plan.Criteria, agentID, sessionID string)
 	if s.Engine == nil {
 		return Verdict{}, nil, errors.New("engine is unavailable")
 	}
-	params := map[string]any{
-		"root":           criteria.Root,
-		"min_age_days":   criteria.MinAgeDays,
-		"min_size_bytes": criteria.MinSizeBytes,
-		"extensions":     criteria.Extensions,
-		"max_results":    criteria.MaxResults,
-	}
-	req, err := protocol.NewRequest("filesystem.find", params,
-		protocol.WithOrigin(protocol.OriginUser),
-		protocol.WithAgent(agentID), protocol.WithSession(sessionID))
+	req, err := findRequest(criteria, agentID, sessionID)
 	if err != nil {
 		return Verdict{}, nil, err
 	}
@@ -66,7 +58,23 @@ func (s *CleanupService) Find(criteria plan.Criteria, agentID, sessionID string)
 	if !ok {
 		return Verdict{}, nil, errors.New("scan observation has an invalid shape")
 	}
+	// File names and scanner labels are untrusted display data. A finding denies
+	// the whole request; it never filters individual candidates or relaxes risk.
+	if err := injection.Veto(injection.ScanResultFields(&scan)...); err != nil {
+		return s.Engine.Veto(req, err.Error()), nil, nil
+	}
 	return verdict, &scan, nil
+}
+
+func findRequest(criteria plan.Criteria, agentID, sessionID string) (*protocol.Request, error) {
+	return protocol.NewRequest("filesystem.find", map[string]any{
+		"root":           criteria.Root,
+		"min_age_days":   criteria.MinAgeDays,
+		"min_size_bytes": criteria.MinSizeBytes,
+		"extensions":     criteria.Extensions,
+		"max_results":    criteria.MaxResults,
+	}, protocol.WithOrigin(protocol.OriginUser),
+		protocol.WithAgent(agentID), protocol.WithSession(sessionID))
 }
 
 // Propose builds a cleanup plan from a scan. The target list is produced by the
@@ -88,6 +96,16 @@ func (s *CleanupService) Propose(criteria plan.Criteria, agentID, sessionID stri
 	if err != nil {
 		return plan.CleanupPlan{}, verdict, err
 	}
+	// The scan veto already covers these values. Recheck the captured plan so a
+	// hostile field can never become approvable through another construction
+	// path.
+	if err := injection.Veto(injection.PlanFields(&p)...); err != nil {
+		req, reqErr := findRequest(criteria, agentID, sessionID)
+		if reqErr != nil {
+			return plan.CleanupPlan{}, verdict, reqErr
+		}
+		return plan.CleanupPlan{}, s.Engine.Veto(req, err.Error()), nil
+	}
 	s.Cleanups.Put(p, time.Now())
 	return p, verdict, nil
 }
@@ -104,6 +122,9 @@ func (s *CleanupService) Approve(planID, planHash, operator string) (plan.Cleanu
 	}
 	p, err := s.Cleanups.Get(planID, time.Now())
 	if err != nil {
+		return plan.CleanupPlan{}, err
+	}
+	if err := injection.Veto(injection.PlanFields(&p)...); err != nil {
 		return plan.CleanupPlan{}, err
 	}
 	if p.PlanHash != planHash {
@@ -161,6 +182,15 @@ func (s *CleanupService) Trash(planID string) (Verdict, plan.CleanupPlan, error)
 	}
 	if p.Status != plan.CleanupApproved {
 		return Verdict{}, p, errors.New("cleanup plan is not approved")
+	}
+	if err := injection.Veto(injection.PlanFields(&p)...); err != nil {
+		req, reqErr := protocol.NewRequest("filesystem.trash", map[string]any{"plan_id": planID},
+			protocol.WithOrigin(protocol.OriginUser),
+			protocol.WithAgent(p.AgentID), protocol.WithSession(p.SessionID))
+		if reqErr != nil {
+			return Verdict{}, p, reqErr
+		}
+		return s.Engine.Veto(req, err.Error()), p, nil
 	}
 	generic := p.ToGeneric()
 	if err := generic.Validate(); err != nil {
