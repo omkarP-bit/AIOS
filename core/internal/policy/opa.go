@@ -16,6 +16,7 @@ import (
 
 	"aios/internal/capability"
 	"aios/internal/catalog"
+	"aios/internal/config"
 	"aios/internal/plan"
 	"aios/internal/protocol"
 )
@@ -111,14 +112,16 @@ type Rego struct {
 	Timeout   time.Duration
 }
 
-// NewRego resolves the binary and policy directory. A missing directory falls
-// back to the packaged policy rather than silently denying everything.
+// NewRego resolves the binary and policy directory. An operator-supplied
+// directory is kept even when invalid so evaluation fails closed; only the
+// historical relative default is resolved against the installed locations.
 func NewRego(policyDir, binary string, timeout time.Duration) *Rego {
 	if policyDir == "" {
-		policyDir = defaultPolicyDir()
-	}
-	if _, err := os.Stat(filepath.Join(policyDir, "authz.rego")); err != nil {
-		policyDir = defaultPolicyDir()
+		policyDir = config.DefaultPolicyDir()
+	} else if _, err := os.Stat(filepath.Join(policyDir, "authz.rego")); err != nil {
+		if policyDir == filepath.Join("aios", "policies") {
+			policyDir = config.DefaultPolicyDir()
+		}
 	}
 	if binary == "" {
 		binary = "opa"
@@ -134,23 +137,6 @@ func NewRego(policyDir, binary string, timeout time.Duration) *Rego {
 		timeout = 5 * time.Second
 	}
 	return &Rego{PolicyDir: policyDir, Binary: binary, Timeout: timeout}
-}
-
-func defaultPolicyDir() string {
-	// core/internal/policy -> repository root/aios/policies
-	wd, err := os.Getwd()
-	if err != nil {
-		return "aios/policies"
-	}
-	dir := wd
-	for i := 0; i < 6; i++ {
-		candidate := filepath.Join(dir, "aios", "policies")
-		if _, err := os.Stat(filepath.Join(candidate, "authz.rego")); err == nil {
-			return candidate
-		}
-		dir = filepath.Dir(dir)
-	}
-	return filepath.Join(wd, "aios", "policies")
 }
 
 // Healthy probes the policy binary and directory with a trivial evaluation.

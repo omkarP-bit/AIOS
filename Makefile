@@ -8,6 +8,7 @@ COMPOSE ?= docker compose
 
 CORE_DIR := core
 BIN_DIR  := $(CORE_DIR)/bin
+POLICY_DIR := aios/policies
 AIOS     := $(BIN_DIR)/aios-core
 AIOSD    := $(BIN_DIR)/aiosd
 
@@ -46,8 +47,10 @@ core-build: ## Build Go binaries
 	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aios-core ./cmd/aios-core
 	cd $(CORE_DIR) && $(GO) build -trimpath -o bin/aiosd ./cmd/aiosd
 
-install-go: ## Install the Go CLI and daemon onto PATH
+install-go: ## Install the Go CLI, daemon, and policy onto PATH/state
 	cd $(CORE_DIR) && GOBIN="$${GOBIN:-$$HOME/.local/bin}" $(GO) install ./cmd/aios-core ./cmd/aiosd
+	@mkdir -p "$$HOME/.aios/policies"
+	@cp $(POLICY_DIR)/* "$$HOME/.aios/policies/"
 
 install-python: ## Install the Python planner and terminal client in editable mode
 	$(PYTHON) -m pip install -e ".[dev]"

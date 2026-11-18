@@ -34,13 +34,61 @@ func Default() Settings {
 	return Settings{
 		APIHost: "127.0.0.1", APIPort: 8000,
 		ProcRoot: "/proc", SysRoot: "/sys",
-		PolicyDir: "aios/policies", OPABinary: "opa", OPATimeout: 2 * time.Second,
+		PolicyDir: DefaultPolicyDir(), OPABinary: "opa", OPATimeout: 2 * time.Second,
 		MaxReadBytes: 1 << 20, MaxDirEntries: 2000,
 		QuarantineDir: filepath.Join(home, ".local", "state", "aios", "quarantine"),
 		LedgerPath:    filepath.Join(home, ".local", "state", "aios", "ledger.jsonl"),
 		ApprovalTTL:   15 * time.Minute,
 		APIURL:        "http://127.0.0.1:8000",
 	}
+}
+
+// DefaultPolicyDir resolves the Rego policy directory without depending on the
+// caller's working directory. It prefers an installed state copy, then a
+// checkout next to the running binary or above the working directory. The
+// final relative path is a fail-closed fallback: OPA will not find it, so
+// evaluation denies instead of using a different policy.
+func DefaultPolicyDir() string {
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".aios", "policies"))
+	}
+	if executable, err := os.Executable(); err == nil {
+		candidates = append(candidates, policyDirsFrom(filepath.Dir(executable))...)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, policyDirsFrom(wd)...)
+	}
+	for _, candidate := range candidates {
+		if hasPolicyFiles(candidate) {
+			return candidate
+		}
+	}
+	return filepath.Join("aios", "policies")
+}
+
+func hasPolicyFiles(dir string) bool {
+	for _, name := range []string{"authz.rego", "data.json"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+func policyDirsFrom(start string) []string {
+	var dirs []string
+	dir := start
+	for i := 0; i < 6; i++ {
+		dirs = append(dirs, filepath.Join(dir, "aios", "policies"))
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return dirs
 }
 
 // Load reads .env (if present) then the environment.

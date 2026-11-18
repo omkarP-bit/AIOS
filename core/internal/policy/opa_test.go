@@ -54,6 +54,35 @@ printf '%s' '{"result":[{"expressions":[{"value":{"decision":"MAYBE","reason":"x
 	}
 }
 
+func TestNewRegoResolvesTheLegacyRelativeDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".aios", "policies")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"authz.rego": "package aios.authz\n",
+		"data.json":  "{}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(want, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rego := NewRego(filepath.Join("aios", "policies"), filepath.Join(t.TempDir(), "opa"), time.Second)
+	if rego.PolicyDir != want {
+		t.Fatalf("PolicyDir = %q, want %q", rego.PolicyDir, want)
+	}
+}
+
+func TestNewRegoKeepsAnExplicitInvalidPolicyDir(t *testing.T) {
+	invalid := filepath.Join(t.TempDir(), "missing-policies")
+	rego := NewRego(invalid, filepath.Join(t.TempDir(), "opa"), time.Second)
+	if rego.PolicyDir != invalid {
+		t.Fatalf("PolicyDir = %q, want explicit %q", rego.PolicyDir, invalid)
+	}
+}
+
 func mustRequest(t *testing.T) *protocol.Request {
 	t.Helper()
 	req, err := protocol.NewRequest("process.list", nil)

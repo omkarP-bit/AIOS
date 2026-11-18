@@ -57,3 +57,57 @@ func TestDotEnvPathPrefersTheStateFileOverTheWorkingDirectory(t *testing.T) {
 		t.Fatalf("dotEnvPath = %q, want %q", got, want)
 	}
 }
+
+func TestDefaultPolicyDirPrefersTheInstalledStateCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".aios", "policies")
+	writePolicy(t, want)
+	if got := DefaultPolicyDir(); got != want {
+		t.Fatalf("DefaultPolicyDir = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultPolicyDirFindsACheckoutFromTheWorkingDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no installed state copy
+	checkout := t.TempDir()
+	want := filepath.Join(checkout, "aios", "policies")
+	writePolicy(t, want)
+	nested := filepath.Join(checkout, "docs", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withChdir(t, nested)
+	if got := DefaultPolicyDir(); got != want {
+		t.Fatalf("DefaultPolicyDir = %q, want %q", got, want)
+	}
+}
+
+func writePolicy(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"authz.rego": "package aios.authz\n",
+		"data.json":  "{}\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func withChdir(t *testing.T, dir string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+}

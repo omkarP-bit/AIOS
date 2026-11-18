@@ -56,14 +56,14 @@ Requirements: Go 1.23+, Python 3.11+, and the `opa` binary for policy
 evaluation.
 
 ```bash
-cd core
-go build ./...
-GOBIN="$HOME/.local/bin" go install ./cmd/aios-core ./cmd/aiosd
-
-cd ..
+make install-go      # installs aios-core/aiosd and copies policy to ~/.aios/policies
 python3 -m pip install -e ".[dev]"
 cp .env.example .env
 ```
+
+Run `make install-go` again after changing anything in `aios/policies/`; the installed
+CLI loads the state copy so cleanup works from any directory. An explicit
+`AIOS_POLICY_DIR` always takes precedence.
 
 There are two front-ends:
 
@@ -382,7 +382,12 @@ opa eval -d aios/policies ...   # inspect a decision
 The Go engine builds a normalized input document, evaluates the policy, and
 enforces the answer. `ALLOW`, `CONFIRM`, and `DENY` all come from the same
 rules. If OPA cannot run, the answer is `DENY` with `policy_unavailable` —
-there is no second implementation to drift from the Rego.
+there is no second implementation to drift from the Rego. The standalone CLI
+resolves the policy from `AIOS_POLICY_DIR`, `~/.aios/policies`, a checkout near
+the binary, or a checkout above the working directory, so `cleanup scan` does
+not depend on where you invoked it. If you see `DENIED policy_unavailable`,
+run `make install-go` or set `AIOS_POLICY_DIR` to this checkout's
+`aios/policies` directory.
 
 ## The AI planner
 
