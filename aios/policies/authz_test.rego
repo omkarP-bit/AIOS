@@ -7,7 +7,10 @@ low_input := {
   "agent_id": "local-agent",
   "session_id": "s",
   "risk": "LOW",
+  "origin": "user",
   "trust_domain": "T3",
+  "read_only": true,
+  "params": {"has_target": false, "plan_id_present": false},
   "capability": {"allowed": true, "matched": "process.list", "target_in_scope": true},
 }
 
@@ -18,6 +21,8 @@ test_low_risk_is_allowed if {
 medium_input := object.union(low_input, {
   "action": "filesystem.read",
   "risk": "MEDIUM",
+  "read_only": true,
+  "params": {"has_target": true, "plan_id_present": false},
   "capability": {"allowed": true, "matched": "filesystem.read:/tmp/*", "target_in_scope": true},
 })
 
@@ -83,6 +88,36 @@ test_risk_mismatch_is_denied if {
   decision.decision == "DENY" with input as object.union(low_input, {"risk": "CRITICAL"})
 }
 
+# Structured origin is a veto input. A model-origin mutation is denied even if
+# every other field would allow it; this is independent of the Go floor.
+test_mutation_by_ai_origin_is_denied if {
+  denied := object.union(high_input, {"origin": "ai"})
+  decision.decision == "DENY" with input as denied
+  decision.reason == "untrusted_mutation_origin" with input as denied
+}
+
+test_unknown_origin_is_denied if {
+  denied := object.union(low_input, {"origin": "model-claimed-root"})
+  decision.decision == "DENY" with input as denied
+  decision.reason == "invalid_origin" with input as denied
+}
+
+test_mutation_without_a_resolved_target_is_denied if {
+  denied := object.union(high_input, {
+    "params": {"has_target": false, "plan_id_present": false},
+  })
+  decision.decision == "DENY" with input as denied
+  decision.reason == "mutation_target_missing" with input as denied
+}
+
+test_deny_priority_is_deterministic if {
+  denied := object.union(low_input, {
+    "action": "filesystem.delete",
+    "capability": {"allowed": false, "target_in_scope": false},
+  })
+  decision.reason == "forbidden_action" with input as denied
+}
+
 # ---------------------------------------------------------------- plan actions
 
 high_input := {
@@ -90,7 +125,10 @@ high_input := {
   "agent_id": "local-agent",
   "session_id": "s",
   "risk": "HIGH",
+  "origin": "user",
   "trust_domain": "T3",
+  "read_only": false,
+  "params": {"has_target": true, "plan_id_present": true},
   "capability": {"allowed": true, "matched": "filesystem.quarantine", "target_in_scope": true},
   "plan": {
     "id": "plan-1",
@@ -104,6 +142,7 @@ high_input := {
 
 test_approved_plan_is_allowed if {
   decision.decision == "ALLOW" with input as high_input
+  decision.policy_id == "aios.authz.allow-plan" with input as high_input
 }
 
 test_approved_restore_is_allowed if {
@@ -172,4 +211,24 @@ test_plan_over_the_byte_limit_is_denied if {
 test_plan_action_with_downgraded_risk_is_denied if {
   decision.decision == "DENY" with input as object.union(high_input, {"risk": "LOW"})
   decision.reason == "risk_mismatch" with input as object.union(high_input, {"risk": "LOW"})
+}
+
+# filesystem.trash is MEDIUM and REVERSIBLE. It may only run with an exact
+# approved plan; a generic confirmation is not enough.
+medium_plan_input := object.union(high_input, {
+  "action": "filesystem.trash",
+  "risk": "MEDIUM",
+  "params": {"has_target": false, "plan_id_present": true},
+})
+
+test_approved_medium_plan_is_allowed if {
+  decision.decision == "ALLOW" with input as medium_plan_input
+  decision.policy_id == "aios.authz.allow-plan" with input as medium_plan_input
+}
+
+test_medium_plan_without_approval_is_denied if {
+  without := object.remove(medium_plan_input, ["approval"])
+  confirmed := object.union(without, {"operator_confirmed": true})
+  decision.decision == "DENY" with input as confirmed
+  decision.reason == "approval_required" with input as confirmed
 }

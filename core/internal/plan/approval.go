@@ -66,13 +66,13 @@ func (g Grant) ValidFor(p Plan, now time.Time) error {
 	return nil
 }
 
-// PolicyDoc is the approval summary handed to Rego.
+// PolicyDoc is the approval summary handed to Rego. Operator identity and the
+// nonce stay in the signed token and audit trail; policy needs only the plan
+// binding and expiry.
 func (g Grant) PolicyDoc() map[string]any {
 	return map[string]any{
 		"valid": true, "plan_id": g.PlanID, "plan_hash": g.PlanHash,
-		"approved_by":   g.ApprovedBy,
 		"expires_at_ns": g.ExpiresAt.UnixNano(),
-		"nonce":         g.Nonce,
 	}
 }
 

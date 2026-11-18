@@ -52,9 +52,11 @@ type Engine interface {
 }
 
 // Doc builds the read-only document Rego receives. Everything here is derived
-// from validated structures; the model cannot add a field.
+// from validated structures; the model cannot add a field. Untrusted free text
+// (intent, declared scope, paths, extensions, file names, and file contents)
+// is deliberately absent: Rego sees only enums, booleans, counts, and bounded
+// numeric criteria.
 func Doc(req *protocol.Request, check *capability.Check, p *plan.Plan, grant *plan.Grant) map[string]any {
-	target := req.Target()
 	dimension := catalog.ScopeDimensionFor(req.ActionName())
 	var targetInScope any = true
 	if dimension != "none" {
@@ -84,25 +86,52 @@ func Doc(req *protocol.Request, check *capability.Check, p *plan.Plan, grant *pl
 	if ok {
 		approvalClass = string(descriptor.Approval)
 	}
-	var targetValue any
-	if target != "" {
-		targetValue = target
-	}
 	return map[string]any{
-		"action": req.ActionName(), "params": req.Params, "target": targetValue,
+		"action": req.ActionName(), "params": structuredParams(req),
 		"risk":           string(catalog.RiskFor(req.ActionName())),
 		"effect":         string(catalog.EffectFor(req.ActionName())),
 		"read_only":      catalog.IsReadOnly(req.ActionName()),
 		"path_action":    catalog.PathParam(req.ActionName()),
 		"approval_class": approvalClass,
 		"agent_id":       req.AgentID, "session_id": req.SessionID,
-		"trust_domain":    string(req.Trust),
-		"capability":      capabilityDoc,
-		"requested_scope": req.RequestedScope,
-		"intent":          req.Intent,
-		"plan":            planDoc, "approval": approvalDoc,
+		"origin": string(req.Origin), "trust_domain": string(req.Trust),
+		"capability": capabilityDoc,
+		"plan":       planDoc, "approval": approvalDoc,
 		"operator_confirmed": req.OperatorConfirmed,
 	}
+}
+
+// structuredParams converts the validated typed params into the only shapes
+// policy is allowed to reason about. No string from the proposal is passed
+// through: presence is reduced to booleans and unbounded text to counts.
+func structuredParams(req *protocol.Request) map[string]any {
+	out := map[string]any{
+		"has_target":      req.Target() != "",
+		"plan_id_present": false,
+	}
+	switch p := req.Typed.(type) {
+	case *protocol.FilesystemFindParams:
+		out["min_age_days"] = p.MinAgeDays
+		out["min_size_bytes"] = p.MinSizeBytes
+		out["max_results"] = p.MaxResults
+		out["extension_count"] = len(p.Extensions)
+	case *protocol.FilesystemCleanupScanParams:
+		out["min_age_days"] = p.MinAgeDays
+		out["min_size_bytes"] = p.MinSizeBytes
+		out["max_results"] = p.MaxCandidates
+		out["extension_count"] = 0
+	case *protocol.FilesystemTrashParams:
+		out["plan_id_present"] = p.PlanID != ""
+	case *protocol.FilesystemQuarantineParams:
+		out["plan_id_present"] = p.PlanID != ""
+	case *protocol.FilesystemRestoreParams:
+		out["plan_id_present"] = p.PlanID != ""
+	case *protocol.ProcessSignalParams:
+		out["plan_id_present"] = p.PlanID != ""
+	case *protocol.NetworkPreferParams:
+		out["plan_id_present"] = p.PlanID != ""
+	}
+	return out
 }
 
 // Rego is the OPA-backed engine.
