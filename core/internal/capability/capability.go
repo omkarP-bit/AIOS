@@ -7,6 +7,8 @@
 package capability
 
 import (
+	"errors"
+	"fmt"
 	"path"
 	"regexp"
 	"strconv"
@@ -69,6 +71,34 @@ func DefaultCapabilities() []Capability {
 	}
 }
 
+// ValidateScopePattern validates an operator grant pattern before it is
+// installed. Wildcards must be scoped at least three segments deep: "/*" and
+// "/home/*" are rejected, while "/home/alice/Downloads/*" is accepted.
+// Relative paths, home expansion, NUL, and control characters are rejected.
+func ValidateScopePattern(pattern string) error {
+	if err := protocol.ValidAbsolutePath(pattern); err != nil {
+		return err
+	}
+	if pattern == "/" {
+		return errors.New("root scope is not allowed")
+	}
+	segments := splitSegments(pattern)
+	if len(segments) == 0 {
+		return errors.New("scope must not be empty")
+	}
+	if strings.ContainsAny(pattern, "*?[") {
+		if len(segments) < 3 {
+			return fmt.Errorf("root-level wildcards are not allowed: %q", pattern)
+		}
+		for _, segment := range segments[:2] {
+			if strings.ContainsAny(segment, "*?[") {
+				return fmt.Errorf("wildcard must be at least three segments deep: %q", pattern)
+			}
+		}
+	}
+	return nil
+}
+
 // Manager owns the in-process grant table.
 type Manager struct {
 	mu      sync.RWMutex
@@ -104,19 +134,51 @@ func (m *Manager) Grant(agentID string, cap Capability) Capability {
 	bucket := m.grants[agentID]
 	replaced := bucket[:0]
 	for _, existing := range bucket {
-		if existing.Action != cap.Action {
+		if !catalog.SameAction(existing.Action, cap.Action) {
 			replaced = append(replaced, existing)
 		}
 	}
 	m.grants[agentID] = append(replaced, cap)
 	kept := m.revoked[agentID][:0]
 	for _, existing := range m.revoked[agentID] {
-		if existing.Action != cap.Action {
+		if !catalog.SameAction(existing.Action, cap.Action) {
 			kept = append(kept, existing)
 		}
 	}
 	m.revoked[agentID] = kept
 	return cap
+}
+
+// GrantScoped is the operator-facing grant path. It validates the action and
+// every scope pattern, attaches an expiry, and leaves an auditable reason.
+func (m *Manager) GrantScoped(agentID, action string, patterns []string, expiresAt *time.Time, grantedBy, reason string) (Capability, error) {
+	if agentID == "" {
+		return Capability{}, errors.New("agent_id must not be empty")
+	}
+	if _, ok := catalog.Catalog[action]; !ok {
+		return Capability{}, fmt.Errorf("unknown action %q", action)
+	}
+	if catalog.Forbidden[action] {
+		return Capability{}, fmt.Errorf("action %q is forbidden", action)
+	}
+	dimension := catalog.ScopeDimensionFor(action)
+	if dimension == "path" && len(patterns) == 0 {
+		return Capability{}, errors.New("PATH actions require a non-empty scope")
+	}
+	scopes := append([]string(nil), patterns...)
+	for _, pattern := range scopes {
+		if err := ValidateScopePattern(pattern); err != nil {
+			return Capability{}, err
+		}
+	}
+	if expiresAt == nil || !expiresAt.After(time.Now()) {
+		return Capability{}, errors.New("grant expiry must be in the future")
+	}
+	cap := Capability{
+		Action: action, Scope: scopes, ExpiresAt: expiresAt,
+		GrantedBy: grantedBy, Reason: reason,
+	}
+	return m.Grant(agentID, cap), nil
 }
 
 // Revoke removes a grant and records it as revoked.
@@ -127,7 +189,7 @@ func (m *Manager) Revoke(agentID, action string) bool {
 	removed := []Capability{}
 	kept := []Capability{}
 	for _, cap := range bucket {
-		if cap.Action == action {
+		if catalog.SameAction(cap.Action, action) {
 			removed = append(removed, cap)
 		} else {
 			kept = append(kept, cap)
@@ -161,7 +223,7 @@ func (m *Manager) CapabilitiesFor(agentID string) []Capability {
 // Has reports whether the agent has a grant for the action.
 func (m *Manager) Has(agentID, action string) bool {
 	for _, cap := range m.CapabilitiesFor(agentID) {
-		if cap.Action == action {
+		if catalog.SameAction(cap.Action, action) {
 			return true
 		}
 	}
@@ -173,7 +235,7 @@ func (m *Manager) IsRevoked(agentID, action string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, cap := range m.revoked[agentID] {
-		if cap.Action == action {
+		if catalog.SameAction(cap.Action, action) {
 			return true
 		}
 	}
@@ -196,7 +258,7 @@ func (m *Manager) Check(agentID, action, target string, now time.Time) Check {
 
 	candidates := []Capability{}
 	for _, cap := range m.CapabilitiesFor(agentID) {
-		if cap.Action == action {
+		if catalog.SameAction(cap.Action, action) {
 			candidates = append(candidates, cap)
 		}
 	}
@@ -212,15 +274,25 @@ func (m *Manager) Check(agentID, action, target string, now time.Time) Check {
 		}
 	}
 
+	// A PATH action without a resolved target is never authorized. The old
+	// `target == ""` shortcut let a scoped grant cover an unspecified target,
+	// which could turn into any path later in the pipeline.
+	if dimension == "path" && target == "" {
+		result.Reason = "path action requires a resolved target"
+		return result
+	}
 	for _, cap := range candidates {
 		if cap.Expired(now) {
 			continue
 		}
-		if dimension == "none" || target == "" {
+		if dimension == "none" {
 			result.Allowed = true
 			result.Reason = "capability granted"
 			result.MatchedCapability = cap.Display()
 			return result
+		}
+		if dimension == "path" && len(cap.Scope) == 0 {
+			continue
 		}
 		switch dimension {
 		case "path":
@@ -266,6 +338,14 @@ func (m *Manager) Check(agentID, action, target string, now time.Time) Check {
 }
 
 // PathInScope matches a normalised path against scope patterns.
+//
+// Scope semantics (tested below):
+//   - "/a/b/*" matches every descendant of /a/b at any depth, but not /a/b
+//     itself. It is recursive.
+//   - "/a/*/c" is single-segment per wildcard: only /a/<one>/c matches.
+//   - "/a/**/c" is recursive: /a/c and /a/x/y/c both match.
+//   - A pattern without a wildcard matches one exact path.
+//   - An empty pattern list never matches.
 func PathInScope(target string, patterns []string) bool {
 	if len(patterns) == 0 {
 		return false

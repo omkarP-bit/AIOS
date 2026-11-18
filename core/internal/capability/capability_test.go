@@ -67,10 +67,74 @@ func TestSegmentGlobDoesNotCrossSeparator(t *testing.T) {
 }
 
 func TestWildcardPrefixIsBroadByDesign(t *testing.T) {
-	// Documented: /home/* is everything under /home, and the grant itself is
-	// what limits it. The matcher must not silently narrow it.
+	// Documented matcher semantics: /home/* is everything under /home. The
+	// operator grant path rejects this pattern as too broad, so the matcher
+	// must not silently narrow it either.
 	if !PathInScope("/home/user/.ssh/id_rsa", []string{"/home/*"}) {
 		t.Error("trailing /* should match strictly below the prefix")
+	}
+}
+
+// ASI02-006: the grant pattern validator rejects root wildcards, home
+// expansion, relative paths, NUL, and traversal before any grant is installed.
+func TestGrantPatternValidation(t *testing.T) {
+	invalid := []string{"/*", "/home/*", "/", "relative", "~/Downloads", "/tmp/x\x00y", "/tmp/../etc", "/tmp/\x1b[2J"}
+	for _, pattern := range invalid {
+		if err := ValidateScopePattern(pattern); err == nil {
+			t.Errorf("accepted invalid grant pattern %q", pattern)
+		}
+	}
+	valid := []string{"/home/alice/Downloads/*", "/home/alice/Downloads", "/var/log/**"}
+	for _, pattern := range valid {
+		if err := ValidateScopePattern(pattern); err != nil {
+			t.Errorf("rejected valid grant pattern %q: %v", pattern, err)
+		}
+	}
+}
+
+// ASI03-001: filesystem.trash is not granted by default and PATH grants need
+// an explicit scope and a resolved target.
+func TestTrashGrantIsNotDefault(t *testing.T) {
+	m := NewManager()
+	if check := m.Check("local-agent", "filesystem.trash", "/tmp/x", time.Now()); check.Allowed {
+		t.Fatal("trash was granted by default")
+	}
+	if _, err := m.GrantScoped("local-agent", "filesystem.trash", nil, nil, "operator", "test"); err == nil {
+		t.Fatal("PATH grant with empty scope was accepted")
+	}
+	if _, err := m.GrantScoped("local-agent", "filesystem.delete", []string{"/tmp/*"}, nil, "operator", "test"); err == nil {
+		t.Fatal("forbidden action was granted")
+	}
+	expires := time.Now().Add(30 * time.Minute)
+	cap, err := m.GrantScoped("local-agent", "filesystem.trash", []string{"/home/alice/Downloads/*"}, &expires, "operator", "cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.ExpiresAt == nil || !cap.ExpiresAt.Equal(expires) {
+		t.Fatalf("expiry not attached: %+v", cap)
+	}
+	if !m.Check("local-agent", "filesystem.trash", "/home/alice/Downloads/old.log", time.Now()).Allowed {
+		t.Fatal("scoped trash grant denied in-scope target")
+	}
+	if m.Check("local-agent", "filesystem.trash", "", time.Now()).Allowed {
+		t.Fatal("unresolved target was authorized")
+	}
+	if m.Check("local-agent", "filesystem.trash", "/etc/shadow", time.Now()).Allowed {
+		t.Fatal("out-of-scope target was authorized")
+	}
+}
+
+// ASI03-002: a grant on the deprecated name authorizes the current operation
+// and vice versa, without changing the risk of the requested action.
+func TestGrantAliasesCoverTrash(t *testing.T) {
+	m := EmptyManager()
+	m.Grant("local-agent", Capability{Action: "filesystem.quarantine", Scope: []string{"/tmp/work/*"}})
+	if !m.Check("local-agent", "filesystem.trash", "/tmp/work/a.log", time.Now()).Allowed {
+		t.Fatal("legacy grant did not cover filesystem.trash")
+	}
+	m.Revoke("local-agent", "filesystem.quarantine")
+	if m.Check("local-agent", "filesystem.trash", "/tmp/work/a.log", time.Now()).Allowed {
+		t.Fatal("revoking the legacy name did not revoke trash")
 	}
 }
 
