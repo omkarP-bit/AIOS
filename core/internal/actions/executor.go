@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"aios/internal/filesafety"
 	"aios/internal/model"
 	"aios/internal/plan"
 	"aios/internal/protocol"
@@ -78,7 +79,8 @@ func (d *Dispatcher) Execute(req *protocol.Request, p plan.Plan, grant plan.Gran
 
 // QuarantineExecutor is the only component that may move a candidate.
 type QuarantineExecutor struct {
-	Dir string
+	Dir   string
+	Rules filesafety.Rules
 }
 
 // NewQuarantineExecutor resolves the quarantine root once.
@@ -95,7 +97,7 @@ func NewQuarantineExecutor(dir string) (*QuarantineExecutor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &QuarantineExecutor{Dir: resolved}, nil
+	return &QuarantineExecutor{Dir: resolved, Rules: filesafety.Default()}, nil
 }
 
 // Execute runs one approved step. It re-checks identity immediately before the
@@ -137,8 +139,17 @@ func (e *QuarantineExecutor) quarantine(params protocol.PlanTargetParams, p plan
 		return model.StepResult{}, refuse("limit_exceeded", "plan exceeds max_bytes")
 	}
 	source := step.Path
-	if !underRoot(source, p.Roots) {
+	if len(p.Roots) == 0 || !underRoot(source, p.Roots) {
 		return model.StepResult{}, refuse("scope_mismatch", "target is outside the approved roots")
+	}
+	verified, err := e.Rules.ValidateTarget(source, p.Roots[0], uint32(os.Getuid()))
+	if err != nil {
+		return model.StepResult{}, refuse(filesafetyReason(err), "target failed filesystem safety checks: %v", err)
+	}
+	if verified.Realpath != source || verified.Size != step.SizeBytes ||
+		verified.Mtime != step.MtimeNS || verified.Inode != step.Ino ||
+		verified.Device != step.Dev || verified.Owner != step.UID {
+		return model.StepResult{}, refuse("target_changed", "target identity changed since the plan was approved")
 	}
 	info, err := os.Lstat(source)
 	if err != nil {
@@ -316,6 +327,22 @@ func verifyRecordIdentity(info os.FileInfo, record model.QuarantineRecord) error
 		return refuse("target_changed", "quarantined payload changed")
 	}
 	return nil
+}
+
+// filesafetyReason maps a safety refusal to the closed executor reason set.
+func filesafetyReason(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "protected"), strings.Contains(message, "another user"):
+		return "not_permitted"
+	case strings.Contains(message, "symlink"), strings.Contains(message, "outside"),
+		strings.Contains(message, "root"), strings.Contains(message, "invalid path"):
+		return "scope_mismatch"
+	case strings.Contains(message, "device"):
+		return "cross_device"
+	default:
+		return "target_changed"
+	}
 }
 
 func deviceOfPath(path string) (uint64, bool) {

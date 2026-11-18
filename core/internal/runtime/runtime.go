@@ -57,7 +57,15 @@ func New(settings config.Settings) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := policy.NewRego(settings.PolicyDir, settings.OPABinary, settings.OPATimeout)
+	policyDir := settings.PolicyDir
+	if policyDir == "" {
+		policyDir = config.DefaultPolicyDir()
+	}
+	local, err := policy.NewLocal(policyDir)
+	if err != nil {
+		return nil, err
+	}
+	p := policy.NewStricter(local, policy.NewRego(policyDir, settings.OPABinary, settings.OPATimeout))
 	rt := &Runtime{
 		Settings: settings, Gateway: gw, Executor: executor,
 		Capabilities: capability.NewManager(), Policy: p, Ledger: audit,

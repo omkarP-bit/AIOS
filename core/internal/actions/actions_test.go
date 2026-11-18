@@ -240,12 +240,10 @@ func TestExecutorRefusesSymlinkAndExpiredGrant(t *testing.T) {
 }
 
 func TestScanRefusesProtectedRoots(t *testing.T) {
-	result, err := ScanCandidates("/proc", ScanOptions{MinAgeDays: 0})
-	if err != nil {
-		// /proc exists, so scanning must at least produce no candidates.
-		t.Fatal(err)
+	if _, err := ScanCandidates("/proc", ScanOptions{MinAgeDays: 0}); err == nil {
+		t.Fatal("protected root /proc was accepted")
 	}
-	if result.Total != 0 {
-		t.Fatalf("/proc produced candidates: %+v", result.Candidates)
+	if _, err := ScanCandidates("/etc", ScanOptions{MinAgeDays: 0}); err == nil {
+		t.Fatal("protected root /etc was accepted")
 	}
 }

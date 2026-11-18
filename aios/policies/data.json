@@ -9,6 +9,20 @@
       "per_session_rate_limit": 10,
       "default_dry_run": true
     },
+    "protected_paths": [
+      "~/.ssh",
+      "~/.gnupg",
+      "~/.config",
+      "~/.aios",
+      "**/.git",
+      "/etc",
+      "/boot",
+      "/usr",
+      "/var",
+      "/root",
+      "/proc",
+      "/sys"
+    ],
     "allowed_actions": {
       "system.cpu": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V4"]},
       "system.memory": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},

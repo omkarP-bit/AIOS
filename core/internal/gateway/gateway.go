@@ -11,11 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"aios/internal/actions"
 	"aios/internal/catalog"
+	"aios/internal/filesafety"
 	"aios/internal/model"
 	"aios/internal/observe"
 	"aios/internal/protocol"
@@ -67,6 +67,7 @@ type Gateway struct {
 	MaxReadBytes  int
 	MaxDirEntries int
 	QuarantineDir string
+	Rules         filesafety.Rules
 	handlers      map[string]bool
 }
 
@@ -81,7 +82,7 @@ func New(procRoot, sysRoot, quarantineDir string) *Gateway {
 	g := &Gateway{
 		ProcRoot: procRoot, SysRoot: sysRoot,
 		MaxReadBytes: 1 << 20, MaxDirEntries: 2000, QuarantineDir: quarantineDir,
-		handlers: map[string]bool{},
+		Rules: filesafety.Default(), handlers: map[string]bool{},
 	}
 	for name, descriptor := range catalog.Catalog {
 		if descriptor.ReadOnly && !catalog.ExecutorActions[name] {
@@ -243,7 +244,7 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 			}
 			return envelope("procfs:"+g.ProcRoot+"/mounts", "gateway", "T2", name, data), nil
 		}
-		if sensitive(*p.Path) {
+		if g.sensitive(*p.Path) {
 			return nil, fail("path is outside the readable set: %s", *p.Path)
 		}
 		maxEntries := p.MaxEntries
@@ -262,7 +263,7 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 		if !ok {
 			return nil, fail("invalid filesystem params")
 		}
-		if sensitive(p.Path) {
+		if g.sensitive(p.Path) {
 			return nil, fail("path is outside the readable set: %s", p.Path)
 		}
 		meta := observe.StatPath(p.Path)
@@ -309,7 +310,7 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 		default:
 			return nil, fail("invalid scan params")
 		}
-		if sensitive(root) {
+		if g.sensitive(root) {
 			return nil, fail("path is outside the readable set: %s", root)
 		}
 		if opts.MaxCandidates < 1 || opts.MaxCandidates > g.MaxDirEntries {
@@ -327,24 +328,19 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 	return nil, ActionNotPermitted{GatewayError{Message: "action " + name + " is not in the gateway whitelist"}}
 }
 
-// SensitivePrefixes are never listed, stat'ed, or read.
+// SensitivePrefixes is retained for compatibility. The authoritative list is
+// filesafety.Rules, which also covers the home and .git protections.
 var SensitivePrefixes = []string{
 	"/etc/shadow", "/etc/sudoers", "/etc/ssh", "/root",
 	"/proc/kcore", "/dev/mem", "/dev/kmem", "/dev/port",
 	"/sys/kernel/security", "/boot",
 }
 
-func sensitive(path string) bool {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		resolved = filepath.Clean(path)
+func (g *Gateway) sensitive(path string) bool {
+	if g != nil && g.Rules.Configured() {
+		return g.Rules.IsProtected(path)
 	}
-	for _, prefix := range SensitivePrefixes {
-		if resolved == prefix || strings.HasPrefix(resolved, strings.TrimSuffix(prefix, "/")+"/") {
-			return true
-		}
-	}
-	return false
+	return filesafety.Default().IsProtected(path)
 }
 
 func asMap(value any) map[string]any {

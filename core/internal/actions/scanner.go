@@ -14,7 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"aios/internal/filesafety"
 	"aios/internal/model"
+	"aios/internal/protocol"
 )
 
 // ProtectedPrefixes are never scanned, whatever the model asks for.
@@ -35,6 +37,7 @@ type ScanOptions struct {
 	MaxCandidates int
 	IncludeHidden bool
 	ExcludeRoots  []string
+	Rules         *filesafety.Rules
 	Now           time.Time
 	UID           *uint32
 }
@@ -48,17 +51,35 @@ func (o *ScanOptions) defaults() {
 	}
 }
 
+func (o *ScanOptions) rules() filesafety.Rules {
+	if o.Rules != nil {
+		return *o.Rules
+	}
+	return filesafety.Default()
+}
+
 // ScanCandidates walks root and returns bounded, deterministic candidates.
 // The scanner, not the model, decides what is a candidate.
 func ScanCandidates(root string, opts ScanOptions) (model.ScanResult, error) {
 	opts.defaults()
-	resolved, err := filepath.EvalSymlinks(root)
+	rules := opts.rules()
+	if err := protocol.ValidAbsolutePath(root); err != nil {
+		return model.ScanResult{}, err
+	}
+	cleanRoot := filepath.Clean(root)
+	resolved, err := filepath.EvalSymlinks(cleanRoot)
 	if err != nil {
 		return model.ScanResult{}, err
 	}
 	resolved, err = filepath.Abs(resolved)
 	if err != nil {
 		return model.ScanResult{}, err
+	}
+	if resolved != cleanRoot {
+		return model.ScanResult{}, errors.New("symlinked scan roots are not allowed")
+	}
+	if rules.IsProtected(cleanRoot) || rules.IsProtected(resolved) {
+		return model.ScanResult{}, errors.New("scan root is protected")
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
@@ -89,7 +110,7 @@ func ScanCandidates(root string, opts ScanOptions) (model.ScanResult, error) {
 		GeneratedAt: model.Timestamp{Time: opts.Now.UTC().Truncate(time.Microsecond)},
 	}
 	var truncated bool
-	err = walkFilesFirst(resolved, opts.IncludeHidden, excluded, func(path string) bool {
+	err = walkFilesFirst(resolved, opts.IncludeHidden, excluded, rules, func(path string) bool {
 		if truncated {
 			return false
 		}
@@ -98,7 +119,7 @@ func ScanCandidates(root string, opts ScanOptions) (model.ScanResult, error) {
 			result.Skipped++
 			return true
 		}
-		if isProtected(path) || isExcluded(path, excluded) {
+		if rules.IsProtected(path) || isExcluded(path, excluded) {
 			result.Skipped++
 			return true
 		}
@@ -162,7 +183,7 @@ func ScanCandidates(root string, opts ScanOptions) (model.ScanResult, error) {
 
 // walkFilesFirst visits regular files before recursing into subdirectories,
 // matching the Python walker's order.
-func walkFilesFirst(dir string, includeHidden bool, excluded []string, visit func(string) bool) error {
+func walkFilesFirst(dir string, includeHidden bool, excluded []string, rules filesafety.Rules, visit func(string) bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil // unreadable directory: skip, as the reference does
@@ -176,7 +197,7 @@ func walkFilesFirst(dir string, includeHidden bool, excluded []string, visit fun
 				continue
 			}
 			child := filepath.Join(dir, entry.Name())
-			if isProtected(child) || isExcluded(child, excluded) {
+			if rules.IsProtected(child) || isExcluded(child, excluded) {
 				continue
 			}
 			dirs = append(dirs, child)
@@ -190,20 +211,11 @@ func walkFilesFirst(dir string, includeHidden bool, excluded []string, visit fun
 		}
 	}
 	for _, child := range dirs {
-		if err := walkFilesFirst(child, includeHidden, excluded, visit); err != nil {
+		if err := walkFilesFirst(child, includeHidden, excluded, rules, visit); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func isProtected(path string) bool {
-	for _, prefix := range ProtectedPrefixes {
-		if path == prefix || strings.HasPrefix(path, strings.TrimSuffix(prefix, "/")+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func isExcluded(path string, excluded []string) bool {
