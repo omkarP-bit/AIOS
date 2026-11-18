@@ -6,7 +6,10 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"aios/internal/actions"
@@ -49,6 +52,7 @@ const (
 	NotPermitted         DenialReason = "not_permitted"
 	ZombieNotKillable    DenialReason = "zombie_not_killable"
 	BackendUnavailable   DenialReason = "backend_unavailable"
+	AuditUnavailable     DenialReason = "audit_unavailable"
 	InternalError        DenialReason = "internal_error"
 )
 
@@ -189,8 +193,15 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 			"", &check, &result, started)
 	}
 
-	state = e.transition(req, protocol.StateValidated, protocol.StateAuthorized, risk,
-		policy.Allow, result.Reason, &check, nil, &result.Source, &target)
+	// Write-ahead audit: the AUTHORIZED row must be durable before either the
+	// gateway or the mutation executor can run. A ledger failure denies here,
+	// while the action is still in VALIDATED, so nothing has been touched.
+	if err := e.logAuthorization(req, risk, result.Reason, &check, &result.Source, &target, p); err != nil {
+		return e.verdict(req, protocol.StateValidated, policy.Deny, risk,
+			"authorization could not be written to the audit log", AuditUnavailable,
+			&check, &result, started)
+	}
+	state = protocol.StateAuthorized
 
 	if !execute {
 		return e.verdict(req, state, policy.Allow, risk, result.Reason, "",
@@ -277,13 +288,19 @@ func (e *Engine) transition(req *protocol.Request, from, to protocol.State, risk
 	return to
 }
 
-func (e *Engine) log(req *protocol.Request, state protocol.State, risk string, decision policy.Decision, reason string, check *capability.Check, durationMS *float64, policySource, target *string) {
+// auditEntry builds one row from validated engine state. Provenance and plan
+// binding come from the engine, never from the proposal. Untrusted text (the
+// model's intent, declared scope, roots, extensions, and file names) is reduced
+// to presence flags, counts, and lengths; no raw string is copied to the trail.
+func (e *Engine) auditEntry(req *protocol.Request, state protocol.State, risk string, decision policy.Decision, reason string, check *capability.Check, durationMS *float64, policySource, target *string) ledger.Entry {
 	entry := ledger.Entry{
 		ActionID: req.ActionID, SessionID: req.SessionID, AgentID: req.AgentID,
 		Action: req.ActionName(), State: string(state), Risk: risk,
 		Decision: string(decision), Reason: reason,
 		PolicySource: policySource, Target: target, DurationMS: durationMS,
-		At: now(),
+		At:          now(),
+		TrustDomain: string(req.Trust), Origin: string(req.Origin),
+		ASITags: asiTags(req.ActionName()), Params: auditParams(req),
 	}
 	if check != nil {
 		matched := check.MatchedCapability
@@ -291,21 +308,109 @@ func (e *Engine) log(req *protocol.Request, state protocol.State, risk string, d
 		entry.Capability = &matched
 		entry.CapabilityReason = &capReason
 	}
+	return entry
+}
+
+// log is the best-effort audit path for state transitions that are not the
+// write-ahead AUTHORIZED row. Failures are counted but do not block a decision.
+func (e *Engine) log(req *protocol.Request, state protocol.State, risk string, decision policy.Decision, reason string, check *capability.Check, durationMS *float64, policySource, target *string) {
+	_ = e.record(e.auditEntry(req, state, risk, decision, reason, check, durationMS, policySource, target))
+}
+
+// logAuthorization writes the write-ahead AUTHORIZED row. Unlike the other
+// audit calls, its error is returned to the pipeline: no execution may start
+// until this row is durable.
+func (e *Engine) logAuthorization(req *protocol.Request, risk, reason string, check *capability.Check, policySource, target *string, p *plan.Plan) error {
+	entry := e.auditEntry(req, protocol.StateAuthorized, risk, policy.Allow, reason, check, nil, policySource, target)
+	if p != nil {
+		planID, planHash := p.PlanID, p.PlanHash
+		entry.PlanID, entry.PlanHash = &planID, &planHash
+	}
+	return e.record(entry)
+}
+
+// record is the single sink for audit rows. A missing or failing ledger is
+// counted and returned; callers decide whether it is best-effort or fatal.
+func (e *Engine) record(entry ledger.Entry) error {
+	if e.Ledger == nil {
+		e.LedgerErrors++
+		return errors.New("audit ledger unavailable")
+	}
 	if err := e.Ledger.Record(entry); err != nil {
 		e.LedgerErrors++
+		return err
 	}
+	return nil
+}
+
+const (
+	maxAuditParamKeys = 8
+)
+
+// auditParams reduces a request to a bounded, content-free summary. String
+// values are replaced by their length, and collections by their count, so a
+// hostile file name or injected instruction can never enter the audit trail.
+func auditParams(req *protocol.Request) map[string]any {
+	out := map[string]any{"intent_present": req.Intent != nil}
+	if req.RequestedScope != nil {
+		out["scope_keys"] = len(req.RequestedScope)
+	}
+	keys := make([]string, 0, len(req.Params))
+	for key := range req.Params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if len(out) >= maxAuditParamKeys {
+			out["params_truncated"] = true
+			break
+		}
+		if _, exists := out[key]; exists {
+			continue
+		}
+		out[key] = summariseAuditValue(req.Params[key])
+	}
+	return out
+}
+
+func summariseAuditValue(value any) any {
+	switch v := value.(type) {
+	case nil:
+		return "null"
+	case bool, float64, int, int64:
+		return v
+	case string:
+		return map[string]any{"chars": len(v)}
+	case []any:
+		return map[string]any{"count": len(v)}
+	case map[string]any:
+		return map[string]any{"keys": len(v)}
+	default:
+		return map[string]any{"type": fmt.Sprintf("%T", v)}
+	}
+}
+
+// asiTags returns only the OWASP ASI tags for an action. Unknown actions get
+// the fail-closed tag used by their CRITICAL catalog descriptor.
+func asiTags(action string) []string {
+	descriptor, ok := catalog.Lookup(action)
+	if !ok {
+		return []string{"OWASP-ASI05:2025"}
+	}
+	tags := []string{}
+	for _, tag := range descriptor.OWASP {
+		if strings.HasPrefix(tag, "OWASP-ASI") {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
 }
 
 func (e *Engine) deny(req *protocol.Request, state protocol.State, decision policy.Decision, risk string, denial DenialReason, reason string, started time.Time, check *capability.Check, result *policy.Result) Verdict {
 	detail := string(denial)
-	entry := ledger.Entry{
-		ActionID: req.ActionID, SessionID: req.SessionID, AgentID: req.AgentID,
-		Action: req.ActionName(), State: string(state), Risk: risk,
-		Decision: string(decision), Reason: reason, Detail: &detail, At: now(),
-	}
-	if err := e.Ledger.Record(entry); err != nil {
-		e.LedgerErrors++
-	}
+	entry := e.auditEntry(req, state, risk, decision, reason, check, nil, nil, nil)
+	entry.Detail = &detail
+	_ = e.record(entry)
 	return e.verdict(req, state, decision, risk, reason, denial, check, result, started)
 }
 
@@ -316,19 +421,10 @@ func (e *Engine) verdict(req *protocol.Request, state protocol.State, decision p
 		terminal = protocol.StateDenied
 		_ = protocol.AssertTransition(state, terminal)
 		detail := string(denial)
-		entry := ledger.Entry{
-			ActionID: req.ActionID, SessionID: req.SessionID, AgentID: req.AgentID,
-			Action: req.ActionName(), State: string(terminal), Risk: risk,
-			Decision: string(decision), Reason: reason, Detail: &detail,
-			DenialReason: &detail, At: now(),
-		}
-		if check != nil {
-			matched := check.MatchedCapability
-			entry.Capability = &matched
-		}
-		if err := e.Ledger.Record(entry); err != nil {
-			e.LedgerErrors++
-		}
+		entry := e.auditEntry(req, terminal, risk, decision, reason, check, nil, nil, nil)
+		entry.Detail = &detail
+		entry.DenialReason = &detail
+		_ = e.record(entry)
 		denialPtr = &denial
 	}
 	return Verdict{

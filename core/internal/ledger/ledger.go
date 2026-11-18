@@ -1,5 +1,7 @@
-// Package ledger appends the audit trail. Writes are best-effort at the call
-// site: losing a row is bad, re-running an authorized action is worse.
+// Package ledger appends the audit trail. The AUTHORIZED row is written
+// synchronously before any mutation: if it cannot be made durable, the engine
+// refuses to execute. The in-memory trail mirrors only rows that were actually
+// persisted (or that were accepted into an in-memory-only ledger).
 package ledger
 
 import (
@@ -13,7 +15,9 @@ import (
 	"aios/internal/model"
 )
 
-// Entry is one audit row.
+// Entry is one audit row. Untrusted text is never copied verbatim: Params is a
+// bounded summary of presence flags and counts, and Target is a validated,
+// normalised path or identifier.
 type Entry struct {
 	ActionID         string          `json:"action_id"`
 	SessionID        string          `json:"session_id"`
@@ -31,6 +35,13 @@ type Entry struct {
 	At               model.Timestamp `json:"at"`
 	Detail           *string         `json:"detail"`
 	DenialReason     *string         `json:"denial_reason"`
+	// Provenance and plan binding are set by the engine, never by the caller.
+	TrustDomain string         `json:"trust_domain,omitempty"`
+	Origin      string         `json:"origin,omitempty"`
+	PlanID      *string        `json:"plan_id,omitempty"`
+	PlanHash    *string        `json:"plan_hash,omitempty"`
+	ASITags     []string       `json:"asi_tags,omitempty"`
+	Params      map[string]any `json:"params,omitempty"`
 }
 
 // Ledger keeps entries in memory and, when Path is set, appends them as JSONL.
@@ -52,6 +63,19 @@ func New(path string) (*Ledger, error) {
 			return nil, err
 		}
 		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		// Persist the directory entry as well, so a crash cannot lose the log
+		// file that later holds the AUTHORIZED row.
+		dir, err := os.Open(filepath.Dir(path))
+		if err != nil {
+			return nil, err
+		}
+		if err := dir.Sync(); err != nil {
+			dir.Close()
+			return nil, err
+		}
+		if err := dir.Close(); err != nil {
 			return nil, err
 		}
 		if err := l.load(); err != nil {
@@ -85,30 +109,34 @@ func (l *Ledger) load() error {
 	return scanner.Err()
 }
 
-// Record appends one row and fsyncs the durable log.
+// Record appends one row and fsyncs the durable log. The in-memory trail is
+// updated only after the write succeeds, so a failed AUTHORIZED write can never
+// appear as if execution had been authorized.
 func (l *Ledger) Record(entry Entry) error {
 	if entry.At.IsZero() {
 		entry.At = model.Timestamp{Time: time.Now().UTC().Truncate(time.Microsecond)}
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = append(l.entries, entry)
-	if l.path == "" {
-		return nil
-	}
-	file, err := os.OpenFile(l.path, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(append(encoded, '\n')); err != nil {
-		return err
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.path != "" {
+		file, err := os.OpenFile(l.path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		if _, err := file.Write(append(encoded, '\n')); err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			return err
+		}
 	}
-	return file.Sync()
+	l.entries = append(l.entries, entry)
+	return nil
 }
 
 // Entries returns a copy of the in-memory trail.
