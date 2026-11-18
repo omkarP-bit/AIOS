@@ -57,7 +57,7 @@ func NewDispatcher(quarantineDir, procRoot string, network NetworkController) (*
 // Execute dispatches by action name.
 func (d *Dispatcher) Execute(req *protocol.Request, p plan.Plan, grant plan.Grant) (model.StepResult, error) {
 	switch req.ActionName() {
-	case "filesystem.quarantine", "filesystem.restore":
+	case "filesystem.trash", "filesystem.quarantine", "filesystem.restore":
 		if d.Quarantine == nil {
 			return model.StepResult{}, refuse("executor_unavailable", "quarantine executor is not configured")
 		}
@@ -110,6 +110,8 @@ func (e *QuarantineExecutor) Execute(req *protocol.Request, p plan.Plan, grant p
 		return model.StepResult{}, refuse("approval_expired", "approval has expired")
 	}
 	switch req.ActionName() {
+	case "filesystem.trash":
+		return e.TrashAll(req, p, grant)
 	case "filesystem.quarantine":
 		params, ok := req.Typed.(*protocol.FilesystemQuarantineParams)
 		if !ok {
@@ -132,6 +134,66 @@ func (e *QuarantineExecutor) quarantine(params protocol.PlanTargetParams, p plan
 	if err != nil {
 		return model.StepResult{}, refuse("scope_mismatch", "%s", err.Error())
 	}
+	return e.quarantineStep(step, p, grant)
+}
+
+// TrashAll moves every entry of an engine-built plan. The request carries only
+// a plan id: no path, candidate, or step list can be supplied by the caller.
+// Each entry is re-verified immediately before its own rename, so a swap
+// detected halfway through stops the rest of the plan. Files already moved
+// remain in reversible quarantine and can be restored by plan.
+func (e *QuarantineExecutor) TrashAll(req *protocol.Request, p plan.Plan, grant plan.Grant) (model.StepResult, error) {
+	if grant.PlanID != p.PlanID || grant.PlanHash != p.PlanHash {
+		return model.StepResult{}, refuse("approval_invalid", "approval does not match the plan")
+	}
+	if !time.Now().Before(grant.ExpiresAt.Time) {
+		return model.StepResult{}, refuse("approval_expired", "approval has expired")
+	}
+	params, ok := req.Typed.(*protocol.FilesystemTrashParams)
+	if !ok || params.PlanID != p.PlanID {
+		return model.StepResult{}, refuse("scope_mismatch", "plan id does not match the approved plan")
+	}
+	if len(p.Steps) == 0 {
+		return model.StepResult{}, refuse("target_missing", "plan has no approved entries")
+	}
+	if len(p.Steps) > p.Limits.MaxItems || p.TotalBytes() > p.Limits.MaxBytes {
+		return model.StepResult{}, refuse("limit_exceeded", "plan exceeds its approved limits")
+	}
+
+	results := make([]map[string]any, 0, len(p.Steps))
+	var moved int64
+	for _, step := range p.Steps {
+		result, err := e.quarantineStep(step, p, grant)
+		if err != nil {
+			detail := fmt.Sprintf("stopped after %d of %d entries: %v", len(results), len(p.Steps), err)
+			reason := "executor_refused"
+			if execErr, ok := err.(ExecutorError); ok {
+				reason = execErr.Reason
+			}
+			return model.StepResult{}, ExecutorError{Message: detail, Reason: reason}
+		}
+		results = append(results, map[string]any{
+			"candidate_id": step.CandidateID,
+			"path":         step.Path,
+			"bytes_moved":  result.BytesMoved,
+			"status":       result.Status,
+		})
+		moved += result.BytesMoved
+	}
+	root := ""
+	if len(p.Roots) > 0 {
+		root = p.Roots[0]
+	}
+	return model.StepResult{
+		Action: "filesystem.trash", Path: root, Status: "trashed", BytesMoved: moved,
+		Data: map[string]any{
+			"plan_id": p.PlanID, "plan_hash": p.PlanHash,
+			"file_count": len(results), "entries": results,
+		},
+	}, nil
+}
+
+func (e *QuarantineExecutor) quarantineStep(step plan.Step, p plan.Plan, grant plan.Grant) (model.StepResult, error) {
 	if len(p.Steps) > p.Limits.MaxItems {
 		return model.StepResult{}, refuse("limit_exceeded", "plan exceeds max_items")
 	}
@@ -376,7 +438,7 @@ func underRoot(path string, roots []string) bool {
 
 // ExecutorActions is the fixed set the dispatcher serves.
 func ExecutorActions() []string {
-	return []string{"filesystem.quarantine", "filesystem.restore", "process.signal", "network.prefer"}
+	return []string{"filesystem.trash", "filesystem.quarantine", "filesystem.restore", "process.signal", "network.prefer"}
 }
 
 var errRenameUnavailable = errors.New("renameat2 is not available on this platform")

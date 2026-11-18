@@ -316,6 +316,67 @@ func TestPlanOnlyRequestChecksEveryPlanTarget(t *testing.T) {
 	}
 }
 
+// ASI02-027: a plan-only trash request goes through the full engine pipeline.
+// Targets come from the engine-built plan, and every entry is moved.
+func TestPlanOnlyTrashExecutesThroughEngine(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "a.log")
+	second := filepath.Join(root, "b.log")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan, err := actions.ScanCandidates(root, actions.ScanOptions{MinAgeDays: 0})
+	if err != nil || len(scan.Candidates) != 2 {
+		t.Fatalf("scan: %v %+v", err, scan)
+	}
+	p := plan.FromCandidates(scan.Candidates, root, "local-agent", "cli", nil, 500, 1<<30, time.Now())
+	authority, err := plan.NewAuthority([]byte("0123456789abcdef0123456789abcdef"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := authority.Mint(p, "operator", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := authority.Verify(token, p, true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := testEngine(t, fixedPolicy{policy.Allow, "approved plan"})
+	e.Capabilities.Grant("local-agent", capability.Capability{
+		Action: "filesystem.trash", Scope: []string{root + "/*"}, GrantedBy: "test",
+	})
+	req, err := protocol.NewRequest("filesystem.trash", map[string]any{"plan_id": p.PlanID},
+		protocol.WithOrigin(protocol.OriginUser))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := e.Process(req, &p, &grant)
+	if verdict.Decision != policy.Allow || !verdict.Executed || verdict.Result == nil {
+		t.Fatalf("trash denied: %+v", verdict)
+	}
+	if verdict.Result.Data == nil {
+		t.Fatal("trash result has no data")
+	}
+	for _, path := range []string{first, second} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("file still present: %s", path)
+		}
+	}
+	states := e.Ledger.States(req.ActionID)
+	found := false
+	for _, state := range states {
+		if state == string(protocol.StateAuthorized) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("AUTHORIZED row missing: %v", states)
+	}
+}
+
 // ASI02-024: the durable AUTHORIZED row is a write-ahead gate. If the ledger
 // cannot accept it, no file is moved and the request is denied before the
 // executor is reached.

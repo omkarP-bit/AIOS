@@ -239,6 +239,53 @@ func TestExecutorRefusesSymlinkAndExpiredGrant(t *testing.T) {
 	}
 }
 
+// ASI02-026: filesystem.trash takes only a plan id. The executor must move
+// every approved entry, re-checking each identity immediately before its rename.
+func TestPlanOnlyTrashMovesEveryEntry(t *testing.T) {
+	root := t.TempDir()
+	oldFile(t, root, "cache/a.log")
+	oldFile(t, root, "cache/b.log")
+	result, err := ScanCandidates(root, ScanOptions{MinAgeDays: 30})
+	if err != nil || len(result.Candidates) != 2 {
+		t.Fatalf("scan: %v %+v", err, result)
+	}
+	p := plan.FromCandidates(result.Candidates, root, "local-agent", "cli", nil, 500, 1<<30, time.Now())
+	grant, _ := approve(t, p)
+	dispatcher, err := NewDispatcher(filepath.Join(root, "quarantine"), "/proc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := protocol.NewRequest("filesystem.trash", map[string]any{"plan_id": p.PlanID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dispatcher.Execute(req, p, grant)
+	if err != nil {
+		t.Fatalf("trash failed: %v", err)
+	}
+	if out.Action != "filesystem.trash" || out.Status != "trashed" || out.Data["file_count"] != 2 {
+		t.Fatalf("unexpected trash result: %+v", out)
+	}
+	for _, candidate := range result.Candidates {
+		if _, err := os.Lstat(candidate.Path); !os.IsNotExist(err) {
+			t.Errorf("file still present: %s", candidate.Path)
+		}
+		meta := filepath.Join(root, "quarantine", p.PlanID, candidate.CandidateID, "meta.json")
+		if _, err := os.Stat(meta); err != nil {
+			t.Errorf("quarantine record missing: %v", err)
+		}
+	}
+
+	// A different plan id in the request cannot reuse this approval.
+	other, err := protocol.NewRequest("filesystem.trash", map[string]any{"plan_id": "plan-0123456789abcdef01234567"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.Execute(other, p, grant); err == nil {
+		t.Fatal("mismatched plan id was accepted")
+	}
+}
+
 func TestScanRefusesProtectedRoots(t *testing.T) {
 	if _, err := ScanCandidates("/proc", ScanOptions{MinAgeDays: 0}); err == nil {
 		t.Fatal("protected root /proc was accepted")
