@@ -19,6 +19,28 @@ func TestRequestDefaultsAndTrust(t *testing.T) {
 	}
 }
 
+// ASI01-003: the lifecycle includes an explicit human-approval state and
+// denial remains reachable from every pre-execution state.
+func TestLifecycleIncludesAwaitingConfirmation(t *testing.T) {
+	legal := [][2]State{
+		{StateProposed, StateValidated},
+		{StateValidated, StateAwaitingConfirmation},
+		{StateValidated, StateAuthorized},
+		{StateAwaitingConfirmation, StateAuthorized},
+		{StateAuthorized, StateExecuted},
+	}
+	for _, edge := range legal {
+		if err := AssertTransition(edge[0], edge[1]); err != nil {
+			t.Errorf("rejected legal transition %v: %v", edge, err)
+		}
+	}
+	for _, from := range []State{StateProposed, StateValidated, StateAwaitingConfirmation, StateAuthorized} {
+		if !CanTransition(from, StateDenied) {
+			t.Errorf("DENIED is not reachable from %s", from)
+		}
+	}
+}
+
 func TestTrustedOriginIsDerivedNotAccepted(t *testing.T) {
 	// The protocol accepts the origin; the engine is what refuses a trusted
 	// claim. Here we only assert the derivation cannot be forged.

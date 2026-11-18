@@ -764,7 +764,8 @@ func cleanupQuarantine(rt *runtime.Runtime, args []string) int {
 		req, err := protocol.NewRequest("filesystem.quarantine", map[string]any{
 			"path": step.Path, "plan_id": p.PlanID, "candidate_id": step.CandidateID,
 		}, protocol.WithActionID("cli-quarantine-"+step.CandidateID[2:]),
-			protocol.WithSession("cli"), protocol.WithIntentValue(p.Intent))
+			protocol.WithOrigin(protocol.OriginUser), protocol.WithSession("cli"),
+			protocol.WithIntentValue(p.Intent))
 		if err != nil {
 			fail(err)
 			return 1
@@ -786,7 +787,7 @@ func cleanupQuarantine(rt *runtime.Runtime, args []string) int {
 			req, err := protocol.NewRequest("filesystem.restore", map[string]any{
 				"path": step.Path, "plan_id": p.PlanID, "candidate_id": step.CandidateID,
 			}, protocol.WithActionID("cli-rollback-"+step.CandidateID[2:]),
-				protocol.WithSession("cli"))
+				protocol.WithOrigin(protocol.OriginUser), protocol.WithSession("cli"))
 			if err != nil {
 				continue
 			}
@@ -871,7 +872,7 @@ func cleanupRestore(rt *runtime.Runtime, args []string) int {
 		req, err := protocol.NewRequest("filesystem.restore", map[string]any{
 			"path": step.Path, "plan_id": p.PlanID, "candidate_id": step.CandidateID,
 		}, protocol.WithActionID("cli-restore-"+step.CandidateID[2:]),
-			protocol.WithSession("cli"))
+			protocol.WithOrigin(protocol.OriginUser), protocol.WithSession("cli"))
 		if err != nil {
 			fail(err)
 			return 1

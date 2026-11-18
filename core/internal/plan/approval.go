@@ -43,6 +43,29 @@ type Grant struct {
 	ScopeDigest string          `json:"scope_digest"`
 }
 
+// ValidFor checks that a verified approval token still binds this exact plan.
+// It does not re-check the HMAC; that is the authority's job at the edge. The
+// engine calls this immediately before execution to catch swaps and expiry.
+func (g Grant) ValidFor(p Plan, now time.Time) error {
+	if g.PlanID != p.PlanID || g.PlanHash != p.PlanHash {
+		return ApprovalError("approval is not bound to this plan")
+	}
+	digest, err := scopeDigest(p)
+	if err != nil {
+		return err
+	}
+	if g.ScopeDigest != digest {
+		return ApprovalError("approval scope does not match this plan")
+	}
+	if g.ApprovedBy == "" || g.Nonce == "" {
+		return ApprovalError("approval is missing operator identity")
+	}
+	if !now.Before(g.ExpiresAt.Time) {
+		return ApprovalError("approval has expired")
+	}
+	return nil
+}
+
 // PolicyDoc is the approval summary handed to Rego.
 func (g Grant) PolicyDoc() map[string]any {
 	return map[string]any{

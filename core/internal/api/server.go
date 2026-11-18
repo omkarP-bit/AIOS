@@ -524,16 +524,17 @@ func (s *Server) propose(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	result := s.rt.Engine.Policy.Evaluate(request, &check, nil, nil)
 	result.LatencyMS = float64(time.Since(started)) / float64(time.Millisecond)
+	state := protocol.StateValidated
+	if result.Decision == policy.Confirm {
+		state = protocol.StateAwaitingConfirmation
+	}
 	verdict := engine.Verdict{
 		ActionID: request.ActionID, Action: request.ActionName(),
-		State: protocol.StateValidated, Decision: result.Decision,
+		State: state, Decision: result.Decision,
 		Risk: result.Risk, Reason: result.Reason, Policy: &result,
 		At: now(), DurationMS: result.LatencyMS,
 	}
 	switch result.Decision {
-	case policy.Confirm:
-		denial := engine.ConfirmationRequired
-		verdict.DenialReason = &denial
 	case policy.Deny:
 		denial := engine.PolicyDeny
 		if result.Unavailable() {

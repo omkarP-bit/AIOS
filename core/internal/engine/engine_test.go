@@ -127,7 +127,7 @@ func TestMutationRequiresPlan(t *testing.T) {
 	req, err := protocol.NewRequest("filesystem.quarantine", map[string]any{
 		"path": "/tmp/whatever", "plan_id": "plan-0123456789abcdef01234567",
 		"candidate_id": "c-0123456789abcdef",
-	})
+	}, protocol.WithOrigin(protocol.OriginUser))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestMutationRoundTripThroughEngine(t *testing.T) {
 	req, _ := protocol.NewRequest("filesystem.quarantine", map[string]any{
 		"path": p.Steps[0].Path, "plan_id": p.PlanID,
 		"candidate_id": p.Steps[0].CandidateID,
-	})
+	}, protocol.WithOrigin(protocol.OriginUser))
 	verdict := e.Process(req, &p, &grant)
 	if verdict.Decision != policy.Allow || !verdict.Executed {
 		t.Fatalf("quarantine denied: %+v", verdict)
@@ -195,7 +195,7 @@ func TestMutationRoundTripThroughEngine(t *testing.T) {
 	restoreReq, _ := protocol.NewRequest("filesystem.restore", map[string]any{
 		"path": p.Steps[0].Path, "plan_id": p.PlanID,
 		"candidate_id": p.Steps[0].CandidateID,
-	})
+	}, protocol.WithOrigin(protocol.OriginUser))
 	restored := e.Process(restoreReq, &p, &grant)
 	if restored.Decision != policy.Allow || !restored.Executed {
 		t.Fatalf("restore denied: %+v", restored)
@@ -203,6 +203,115 @@ func TestMutationRoundTripThroughEngine(t *testing.T) {
 	content, err := os.ReadFile(path)
 	if err != nil || string(content) != "payload" {
 		t.Fatalf("restore failed: %v %q", err, content)
+	}
+}
+
+// ASI01-001: CONFIRM is a real lifecycle state, not a denial. The operator
+// can still refuse later, but the proposal is not marked DENIED.
+func TestConfirmEntersAwaitingState(t *testing.T) {
+	e := testEngine(t, fixedPolicy{policy.Confirm, "needs a human"})
+	e.Capabilities.Grant("local-agent", capability.Capability{
+		Action: "filesystem.read", Scope: []string{"/tmp/a.log"}, GrantedBy: "test",
+	})
+	req, err := protocol.NewRequest("filesystem.read", map[string]any{"path": "/tmp/a.log"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := e.Authorize(req, nil, nil)
+	if verdict.Decision != policy.Confirm || verdict.State != protocol.StateAwaitingConfirmation {
+		t.Fatalf("confirm was not awaited: %+v", verdict)
+	}
+	if verdict.DenialReason != nil {
+		t.Fatalf("awaiting confirmation must not be a denial: %v", *verdict.DenialReason)
+	}
+	states := e.Ledger.States(req.ActionID)
+	last := states[len(states)-1]
+	if last != string(protocol.StateAwaitingConfirmation) {
+		t.Fatalf("ledger never recorded AWAITING_CONFIRMATION: %v", states)
+	}
+}
+
+// ASI01-002: a model-origin proposal can never execute a mutation, even with
+// a grant and an otherwise valid approval in place.
+func TestMutationRequiresUserOrigin(t *testing.T) {
+	e := testEngine(t, fixedPolicy{policy.Allow, "allowed"})
+	req, err := protocol.NewRequest("filesystem.quarantine", map[string]any{
+		"path": "/tmp/a.log", "plan_id": "plan-0123456789abcdef",
+		"candidate_id": "c-0123456789abcdef",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := e.Process(req, nil, nil)
+	if verdict.Decision != policy.Deny || verdict.DenialReason == nil || *verdict.DenialReason != PolicyDeny {
+		t.Fatalf("AI-origin mutation was accepted: %+v", verdict)
+	}
+}
+
+// ASI03-003: an approval missing its operator identity is refused before the
+// executor is called.
+func TestExecutorRequiresValidApproval(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "old.log")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := actions.ScanCandidates(root, actions.ScanOptions{MinAgeDays: 0})
+	if err != nil || len(result.Candidates) != 1 {
+		t.Fatalf("scan: %v %+v", err, result)
+	}
+	p := plan.FromCandidates(result.Candidates, root, "local-agent", "cli", nil, 500, 1<<30, time.Now())
+	authority, err := plan.NewAuthority([]byte("0123456789abcdef0123456789abcdef"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := authority.Mint(p, "operator", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := authority.Verify(token, p, true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant.ApprovedBy = ""
+
+	e := testEngine(t, fixedPolicy{policy.Allow, "allowed"})
+	e.Capabilities.Grant("local-agent", capability.Capability{
+		Action: "filesystem.quarantine", Scope: []string{path}, GrantedBy: "test",
+	})
+	req, _ := protocol.NewRequest("filesystem.quarantine", map[string]any{
+		"path": path, "plan_id": p.PlanID, "candidate_id": p.Steps[0].CandidateID,
+	}, protocol.WithOrigin(protocol.OriginUser))
+	verdict := e.Process(req, &p, &grant)
+	if verdict.Decision != policy.Deny || verdict.DenialReason == nil || *verdict.DenialReason != ApprovalInvalid {
+		t.Fatalf("invalid approval was accepted: %+v", verdict)
+	}
+}
+
+// ASI02-020: a plan-only trash request derives its capability targets from the
+// engine-built plan, not from caller-supplied paths.
+func TestPlanOnlyRequestChecksEveryPlanTarget(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "old.log")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := plan.Build("filesystem.trash", []string{root}, []plan.Step{{
+		StepID: "step-1", Action: "filesystem.trash", Path: path,
+	}}, plan.Limits{MaxItems: 1, MaxBytes: 1 << 20}, "local-agent", "cli", nil, time.Now())
+
+	e := testEngine(t, fixedPolicy{policy.Allow, "allowed"})
+	e.Capabilities.Grant("local-agent", capability.Capability{
+		Action: "filesystem.trash", Scope: []string{root + "/*"}, GrantedBy: "test",
+	})
+	req, err := protocol.NewRequest("filesystem.trash", map[string]any{"plan_id": p.PlanID},
+		protocol.WithOrigin(protocol.OriginUser))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := e.Authorize(req, &p, nil)
+	if verdict.Decision != policy.Allow || verdict.Capability == nil || !verdict.Capability.Allowed {
+		t.Fatalf("plan-only target was not authorized: %+v", verdict)
 	}
 }
 

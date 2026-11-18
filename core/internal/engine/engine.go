@@ -145,12 +145,20 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 	if err := req.CheckScopeConsistency(); err != nil {
 		return e.deny(req, state, policy.Deny, risk, ScopeMismatch, err.Error(), started, nil, nil)
 	}
+	if !catalog.IsReadOnly(name) && req.Origin != protocol.OriginUser {
+		return e.deny(req, state, policy.Deny, risk, PolicyDeny,
+			"mutations require a trusted-channel operator instruction", started, nil, nil)
+	}
 
 	state = e.transition(req, state, protocol.StateValidated, risk, policy.Allow,
 		"schema and structure valid", nil, nil, nil, nil)
 
-	target := req.Target()
-	check := e.Capabilities.Check(req.AgentID, name, target, time.Now())
+	targets := requestTargets(req, p)
+	target := ""
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	check, deniedCheck := e.checkCapabilities(req, targets)
 	decision := policy.Deny
 	if check.Allowed {
 		decision = policy.Allow
@@ -158,7 +166,7 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 	e.log(req, state, risk, decision, check.Reason, &check, nil, nil, &target)
 	if !check.Allowed {
 		return e.verdict(req, protocol.StateValidated, policy.Deny, risk, check.Reason,
-			classifyCapabilityDenial(e.Capabilities, req.AgentID, name, check), &check, nil, started)
+			classifyCapabilityDenial(e.Capabilities, req.AgentID, name, deniedCheck), &check, nil, started)
 	}
 
 	policyStarted := time.Now()
@@ -175,8 +183,10 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 			denial, &check, &result, started)
 	}
 	if result.Decision == policy.Confirm {
-		return e.verdict(req, protocol.StateValidated, policy.Confirm, risk, result.Reason,
-			ConfirmationRequired, &check, &result, started)
+		state = e.transition(req, state, protocol.StateAwaitingConfirmation, risk,
+			policy.Confirm, result.Reason, &check, nil, &result.Source, &target)
+		return e.verdict(req, state, policy.Confirm, risk, result.Reason,
+			"", &check, &result, started)
 	}
 
 	state = e.transition(req, protocol.StateValidated, protocol.StateAuthorized, risk,
@@ -188,10 +198,18 @@ func (e *Engine) pipeline(req *protocol.Request, execute bool, p *plan.Plan, gra
 	}
 
 	if servedByExecutor {
-		if e.Executor == nil || p == nil || grant == nil {
+		if e.Executor == nil || p == nil || grant == nil || !catalog.RequiresPlan(name) {
 			return e.verdict(req, state, policy.Deny, risk,
 				"mutation requires an approved plan", PlanRequired,
 				&check, &result, started)
+		}
+		if err := grant.ValidFor(*p, time.Now()); err != nil {
+			denial := ApprovalInvalid
+			if err.Error() == "approval has expired" {
+				denial = ApprovalExpired
+			}
+			return e.verdict(req, state, policy.Deny, risk, err.Error(),
+				denial, &check, &result, started)
 		}
 		mutationStarted := time.Now()
 		step, err := e.Executor.Execute(req, *p, *grant)
@@ -318,6 +336,64 @@ func (e *Engine) verdict(req *protocol.Request, state protocol.State, decision p
 		Decision: decision, Risk: risk, Reason: reason, DenialReason: denialPtr,
 		Capability: check, Policy: result, At: now(), DurationMS: ms(started),
 	}
+}
+
+// requestTargets returns every resource a request may touch. A plan-only
+// mutation has no path in its params, so its targets come from the engine-built
+// plan instead. An empty target is returned deliberately: capability checks
+// deny PATH actions without a resolved target.
+func requestTargets(req *protocol.Request, p *plan.Plan) []string {
+	if target := req.Target(); target != "" {
+		return []string{target}
+	}
+	if p == nil || !catalog.PathParam(req.ActionName()) {
+		return []string{""}
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, step := range p.Steps {
+		if !catalog.PathParam(step.Action) {
+			continue
+		}
+		for _, target := range []string{step.Path, step.Target} {
+			if target == "" || seen[target] {
+				continue
+			}
+			seen[target] = true
+			out = append(out, target)
+		}
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
+}
+
+// checkCapabilities requires a grant for every target. One out-of-scope target
+// is enough to deny the whole request.
+func (e *Engine) checkCapabilities(req *protocol.Request, targets []string) (capability.Check, capability.Check) {
+	merged := capability.Check{
+		AgentID: req.AgentID, Action: req.ActionName(), Allowed: true,
+		Reason: "capability granted", Dimension: catalog.ScopeDimensionFor(req.ActionName()),
+		Risk: string(catalog.RiskFor(req.ActionName())),
+	}
+	denied := merged
+	for index, target := range targets {
+		check := e.Capabilities.Check(req.AgentID, req.ActionName(), target, time.Now())
+		if index == 0 {
+			merged.Target = target
+			merged.MatchedCapability = check.MatchedCapability
+		}
+		if check.Allowed {
+			continue
+		}
+		merged.Allowed = false
+		merged.Reason = check.Reason
+		if denied.Reason == "capability granted" {
+			denied = check
+		}
+	}
+	return merged, denied
 }
 
 func classifyCapabilityDenial(manager *capability.Manager, agentID, action string, check capability.Check) DenialReason {

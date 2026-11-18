@@ -71,24 +71,29 @@ func (t TrustDomain) Trusted() bool {
 type State string
 
 const (
-	StateProposed   State = "PROPOSED"
-	StateValidated  State = "VALIDATED"
-	StateAuthorized State = "AUTHORIZED"
-	StateExecuted   State = "EXECUTED"
-	StateObserved   State = "OBSERVED"
-	StateCompleted  State = "COMPLETED"
-	StateDenied     State = "DENIED"
-	StateFailed     State = "FAILED"
-	StateViolation  State = "VIOLATION"
+	StateProposed             State = "PROPOSED"
+	StateValidated            State = "VALIDATED"
+	StateAwaitingConfirmation State = "AWAITING_CONFIRMATION"
+	StateAuthorized           State = "AUTHORIZED"
+	StateExecuted             State = "EXECUTED"
+	StateObserved             State = "OBSERVED"
+	StateCompleted            State = "COMPLETED"
+	StateDenied               State = "DENIED"
+	StateFailed               State = "FAILED"
+	StateViolation            State = "VIOLATION"
 )
 
 var transitions = map[State]map[State]bool{
-	StateProposed:   {StateValidated: true, StateDenied: true, StateFailed: true},
-	StateValidated:  {StateAuthorized: true, StateDenied: true, StateFailed: true},
-	StateAuthorized: {StateExecuted: true, StateDenied: true, StateFailed: true},
-	StateExecuted:   {StateObserved: true, StateCompleted: true, StateFailed: true},
-	StateObserved:   {StateCompleted: true, StateViolation: true},
-	StateCompleted:  {}, StateDenied: {}, StateFailed: {}, StateViolation: {},
+	StateProposed: {StateValidated: true, StateDenied: true, StateFailed: true},
+	StateValidated: {
+		StateAwaitingConfirmation: true, StateAuthorized: true,
+		StateDenied: true, StateFailed: true,
+	},
+	StateAwaitingConfirmation: {StateAuthorized: true, StateDenied: true, StateFailed: true},
+	StateAuthorized:           {StateExecuted: true, StateDenied: true, StateFailed: true},
+	StateExecuted:             {StateObserved: true, StateCompleted: true, StateFailed: true},
+	StateObserved:             {StateCompleted: true, StateViolation: true},
+	StateCompleted:            {}, StateDenied: {}, StateFailed: {}, StateViolation: {},
 }
 
 // CanTransition reports whether from -> to is a legal edge.

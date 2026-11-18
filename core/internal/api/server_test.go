@@ -332,8 +332,11 @@ func TestProposeReturnsConfirmWithoutExecuting(t *testing.T) {
 	if body["decision"] != "CONFIRM" || body["requires_confirmation"] != true {
 		t.Fatalf("unexpected propose body: %+v", body)
 	}
-	if body["denial_reason"] != "confirmation_required" {
-		t.Fatalf("unexpected denial reason: %+v", body)
+	if body["denial_reason"] != nil {
+		t.Fatalf("awaiting confirmation must not be a denial: %+v", body)
+	}
+	if body["state"] != "AWAITING_CONFIRMATION" {
+		t.Fatalf("unexpected state: %v", body["state"])
 	}
 	if body["target"] != path {
 		t.Fatalf("target missing or wrong: %+v", body["target"])
@@ -342,7 +345,7 @@ func TestProposeReturnsConfirmWithoutExecuting(t *testing.T) {
 		t.Fatalf("propose executed the read: %+v", body)
 	}
 	states := server.rt.Ledger.States(body["action_id"].(string))
-	if len(states) != 1 || states[0] != "VALIDATED" {
+	if len(states) != 1 || states[0] != "AWAITING_CONFIRMATION" {
 		t.Fatalf("unexpected audit states: %+v", states)
 	}
 }
