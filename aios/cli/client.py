@@ -16,6 +16,7 @@ from aios.ai.catalog import Catalog
 from aios.ai.protocol import ActionRequest
 from aios.cli.errors import (
     CliError,
+    DeniedError,
     ServiceUnavailable,
     api_timeout,
     api_unreachable,
@@ -272,6 +273,136 @@ class CoreClient:
         _require_decision(body, "/actions/apply")
         return status, body
 
+    # -- deterministic filesystem cleanup ------------------------------
+
+    def filesystem_find(
+        self,
+        root: str,
+        *,
+        min_age_days: int = 0,
+        min_size_bytes: int = 0,
+        extensions: list[str] | None = None,
+        max_results: int = 500,
+    ) -> dict[str, Any]:
+        """Run a read-only scan driven only by deterministic criteria."""
+        payload: dict[str, Any] = {
+            "root": root,
+            "min_age_days": min_age_days,
+            "min_size_bytes": min_size_bytes,
+            "max_results": max_results,
+        }
+        if extensions:
+            payload["extensions"] = extensions
+        _status, body = self._post("/filesystem/find", payload, verdict_statuses=True)
+        verdict = _cleanup_verdict(body, "/filesystem/find")
+        return {"verdict": verdict, "scan": _object(body.get("scan"), "/filesystem/find")}
+
+    def propose_cleanup(
+        self,
+        root: str,
+        *,
+        min_age_days: int = 0,
+        min_size_bytes: int = 0,
+        extensions: list[str] | None = None,
+        max_results: int = 500,
+    ) -> dict[str, Any]:
+        """Ask the core to build an engine-owned cleanup plan from a scan."""
+        payload: dict[str, Any] = {
+            "root": root,
+            "min_age_days": min_age_days,
+            "min_size_bytes": min_size_bytes,
+            "max_results": max_results,
+        }
+        if extensions:
+            payload["extensions"] = extensions
+        body = self._post("/plans", payload)[1]
+        for key in ("plan_id", "plan_hash", "plan", "status"):
+            if key not in body:
+                raise unexpected_response("/plans")
+        if not isinstance(body["plan"], dict):
+            raise unexpected_response("/plans")
+        _cleanup_verdict(body.get("verdict") or {}, "/plans")
+        return body
+
+    def get_plan(self, plan_id: str) -> dict[str, Any]:
+        body = self._get(f"/plans/{plan_id}")
+        if not isinstance(body.get("plan"), dict):
+            raise unexpected_response(f"/plans/{plan_id}")
+        return body
+
+    def list_plans(self) -> list[dict[str, Any]]:
+        body = self._get("/plans")
+        plans = body.get("plans")
+        if not isinstance(plans, list) or not all(isinstance(p, dict) for p in plans):
+            raise unexpected_response("/plans")
+        return plans
+
+    def approve_cleanup(
+        self, plan_id: str, plan_hash: str, operator: str = "operator-cli"
+    ) -> dict[str, Any]:
+        """Bind the typed exact hash to the stored plan. No paths are sent."""
+        payload = {"plan_hash": plan_hash, "operator": operator}
+        body = self._post(f"/plans/{plan_id}/approve", payload)[1]
+        if not isinstance(body.get("plan"), dict):
+            raise unexpected_response(f"/plans/{plan_id}/approve")
+        return body
+
+    def trash_cleanup(self, plan_id: str) -> dict[str, Any]:
+        """Execute an approved plan. The request contains only the plan id."""
+        _status, body = self._post(f"/plans/{plan_id}/trash", {}, verdict_statuses=True)
+        verdict = _cleanup_verdict(body, f"/plans/{plan_id}/trash")
+        return {"verdict": verdict, "plan": _object(body.get("plan"), "/plans/{id}/trash")}
+
+    def restore_action(self, action_id: str) -> dict[str, Any]:
+        """Restore every entry of one trash action, located by audit id."""
+        _status, body = self._post(f"/restore/{action_id}", {}, verdict_statuses=True)
+        verdicts = body.get("verdicts")
+        if not isinstance(verdicts, list) or not verdicts:
+            raise unexpected_response(f"/restore/{action_id}")
+        for verdict in verdicts:
+            if not isinstance(verdict, dict):
+                raise unexpected_response(f"/restore/{action_id}")
+            raise_for_verdict(verdict, f"/restore/{action_id}")
+        return {"action_id": action_id, "verdicts": verdicts}
+
+
+def _object(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise unexpected_response(path)
+    return value
+
+
+def _cleanup_verdict(body: dict[str, Any], path: str) -> dict[str, Any]:
+    verdict = _object(body.get("verdict"), path)
+    raise_for_verdict(verdict, path)
+    return verdict
+
+
+_UNAVAILABLE_REASONS = {
+    "policy_unavailable",
+    "audit_unavailable",
+    "backend_unavailable",
+}
+
+
+def raise_for_verdict(verdict: dict[str, Any], path: str) -> None:
+    decision = verdict.get("decision")
+    if decision not in {"ALLOW", "CONFIRM", "DENY"}:
+        raise unexpected_response(path)
+    if decision != "DENY":
+        return
+    reason = str(verdict.get("denial_reason") or "")
+    if reason in _UNAVAILABLE_REASONS:
+        raise ServiceUnavailable(
+            "AIOS is failing closed because a security service is unavailable.",
+            next_step="Check `aios status` and the core logs, then retry.",
+        )
+    raise DeniedError(
+        "The AIOS security policy denied this cleanup request.",
+        next_step="Run `aios security` to see why, then adjust the request.",
+        detail=reason or None,
+    )
+
 
 def _data(body: dict[str, Any], path: str) -> dict[str, Any]:
     data = body.get("data")
@@ -301,6 +432,7 @@ def ensure_parent(path: Path) -> None:
 __all__ = [
     "CoreClient",
     "client_from_config",
+    "raise_for_verdict",
     "ensure_parent",
     "history_dir",
 ]

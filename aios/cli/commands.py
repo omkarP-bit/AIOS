@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -16,11 +17,13 @@ import aios
 from aios.ai.providers import provider_status
 from aios.cli.assistant import Assistant
 from aios.cli.chat import run_chat
+from aios.cli.client import raise_for_verdict
 from aios.cli.errors import CliError, UsageError
 from aios.cli.state import AppState, get_state
 from aios.cli.ui.render import (
     render_actions,
     render_audit,
+    render_cleanup_plan,
     render_cpu,
     render_diagnose,
     render_disk,
@@ -47,6 +50,69 @@ app = typer.Typer(
 )
 
 SORTS = {"cpu", "mem", "pid", "name"}
+
+_EXT_OPTION = typer.Option([], "--ext", help="Only these extensions; repeatable.")
+
+_AGE = re.compile(r"^(\d+)\s*([dwm]?)$", re.IGNORECASE)
+_SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt]?i?b?)$", re.IGNORECASE)
+_SIZE_UNITS = {
+    "": 1,
+    "b": 1,
+    "k": 1_000,
+    "kb": 1_000,
+    "ki": 1024,
+    "kib": 1024,
+    "m": 1_000_000,
+    "mb": 1_000_000,
+    "mi": 1 << 20,
+    "mib": 1 << 20,
+    "g": 1_000_000_000,
+    "gb": 1_000_000_000,
+    "gi": 1 << 30,
+    "gib": 1 << 30,
+    "t": 1_000_000_000_000,
+    "tb": 1_000_000_000_000,
+    "ti": 1 << 40,
+    "tib": 1 << 40,
+}
+
+
+def _age_days(value: str) -> int:
+    match = _AGE.match(value.strip())
+    if not match:
+        raise UsageError(
+            f"invalid age {value!r}",
+            next_step="Use a whole number of days, for example --older-than 30d.",
+        )
+    amount = int(match.group(1))
+    unit = (match.group(2) or "d").lower()
+    return amount * {"d": 1, "w": 7, "m": 30}[unit]
+
+
+def _size_bytes(value: str) -> int:
+    match = _SIZE.match(value.strip())
+    if not match:
+        raise UsageError(
+            f"invalid size {value!r}",
+            next_step="Use bytes or a unit such as 10M, 1GiB, or 500KB.",
+        )
+    unit = match.group(2).lower()
+    if unit not in _SIZE_UNITS:
+        raise UsageError(f"unknown size unit in {value!r}", next_step="Use B, K, M, G, or T.")
+    return int(float(match.group(1)) * _SIZE_UNITS[unit])
+
+
+def _confirm(state: AppState, question: str) -> bool:
+    """Ask a question whose default is always No.
+
+    EOF, Ctrl-C, and non-interactive input all mean No. Nothing is inferred
+    from a filename, a plan, or model output.
+    """
+    try:
+        answer = state.console.input(f"{question} [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in {"y", "yes"}
 
 
 def guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -405,6 +471,113 @@ def apply(
                 trust_domain=verdict.get("data_trust") or verdict.get("trust_domain"),
             )
         )
+
+
+@app.command()
+@guarded
+def clean(
+    directory: str = typer.Argument(
+        ..., help="Absolute directory to scan. There is deliberately no default."
+    ),
+    older_than: str = typer.Option("30d", "--older-than", help="Minimum age, e.g. 30d, 2w."),
+    ext: list[str] = _EXT_OPTION,
+    min_size: str = typer.Option("0", "--min-size", help="Minimum size, e.g. 10M or 1048576."),
+    max_results: int = typer.Option(500, "--max-results", min=1, max=5000),
+    approve: bool = typer.Option(
+        False, "--approve", help="Ask for approval after showing the plan (default answer No)."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Answer Yes without a prompt; only meaningful with --approve."
+    ),
+) -> None:
+    """Propose a reversible cleanup plan from deterministic criteria.
+
+    The scan is read-only and never runs by default. Files are selected only by
+    directory, age, size, extension, and result cap -- never by name or content.
+    Approval and trashing are separate, hash-bound steps; files move to
+    reversible quarantine, never to permanent deletion.
+
+    Examples:
+      aios clean /var/log --older-than 30d --ext .log --min-size 10M
+      aios clean ~/Downloads --older-than 90d --approve
+    """
+    state = get_state()
+    days = _age_days(older_than)
+    size = _size_bytes(min_size)
+    extensions = [e if e.startswith(".") else f".{e}" for e in ext]
+    with spinner(state, "building cleanup plan…"):
+        payload = state.client.propose_cleanup(
+            directory,
+            min_age_days=days,
+            min_size_bytes=size,
+            extensions=extensions,
+            max_results=max_results,
+        )
+    plan_data = payload["plan"]
+    plan_id = str(payload["plan_id"])
+    plan_hash = str(payload["plan_hash"])
+    if isinstance(payload.get("verdict"), dict):
+        raise_for_verdict(payload["verdict"], "/plans")
+
+    if state.json_output:
+        state.print_json({**payload, "dry_run": not approve, "approved": False})
+    else:
+        state.console.print(render_cleanup_plan(plan_data))
+
+    if not approve:
+        if not state.json_output:
+            state.console.print(
+                Text(
+                    "Dry run only. Nothing was moved. Re-run with --approve to review and confirm.",
+                    style="aios.dim",
+                )
+            )
+        return
+
+    if state.json_output and not yes:
+        raise UsageError(
+            "Non-interactive approval requires --yes with --approve.",
+            next_step="Use --approve --yes in scripts, or drop --json to answer the prompt.",
+        )
+    if not yes and not _confirm(
+        state, f"Move {plan_data.get('file_count', 0)} files to quarantine?"
+    ):
+        if not state.json_output:
+            state.console.print(Text("Cancelled. Nothing was moved.", style="aios.dim"))
+        return
+
+    with spinner(state, "approving exact plan…"):
+        state.client.approve_cleanup(plan_id, plan_hash)
+    with spinner(state, "moving files to quarantine…"):
+        result = state.client.trash_cleanup(plan_id)
+    if state.json_output:
+        state.print_json({**result, "plan_id": plan_id, "plan_hash": plan_hash, "approved": True})
+        return
+    state.console.print(render_verdict(result["verdict"]))
+    verdict_data = (result["verdict"].get("result") or {}).get("data") or {}
+    action_id = result["verdict"].get("action_id") or verdict_data.get("action_id") or ""
+    state.console.print(
+        Text(
+            "Files moved to reversible quarantine. To undo this action, run: aios restore "
+            + str(action_id),
+            style="aios.dim",
+        )
+    )
+
+
+@app.command()
+@guarded
+def restore(
+    action_id: str = typer.Argument(..., help="Action id printed by `aios clean --approve`."),
+) -> None:
+    """Restore every file moved by one trash action, using its audit id."""
+    state = get_state()
+    with spinner(state, "restoring files…"):
+        result = state.client.restore_action(action_id)
+    if state.json_output:
+        state.print_json(result)
+        return
+    state.console.print(Text(f"Restored action {action_id}.", style="aios.dim"))
 
 
 @app.command()

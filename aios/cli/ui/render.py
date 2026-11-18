@@ -907,6 +907,43 @@ def render_plan(plan: dict[str, Any]) -> Panel:
     )
 
 
+def render_cleanup_plan(plan: dict[str, Any]) -> Panel:
+    """Show the deterministic cleanup plan for human review.
+
+    File names are untrusted T4 data. Every path passes through the sanitizer,
+    so an escape sequence or an embedded instruction renders inert. The plan is
+    display-only: approval is a separate, hash-bound operator action.
+    """
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="aios.dim")
+    grid.add_column(overflow="fold")
+    grid.add_row("root", _text((plan.get("criteria") or {}).get("root"), max_length=240))
+    grid.add_row(
+        "criteria", _block(json.dumps(plan.get("criteria") or {}, sort_keys=True), max_length=800)
+    )
+    grid.add_row("files", _text(plan.get("file_count"), max_length=32))
+    grid.add_row("bytes", _text(plan.get("total_bytes"), max_length=32))
+    grid.add_row("status", _text(plan.get("status"), max_length=32))
+    grid.add_row("plan id", _text(plan.get("plan_id"), max_length=80))
+    grid.add_row("hash", _text(plan.get("plan_hash"), max_length=80, style="bold"))
+    lines: list[str] = []
+    for index, entry in enumerate(plan.get("entries") or [], start=1):
+        if not isinstance(entry, dict):
+            continue
+        # Each field is sanitized independently before it is concatenated.
+        lines.append(
+            f"{index}. {_text(entry.get('realpath'), max_length=240).plain}  "
+            f"({_text(entry.get('size'), max_length=24).plain} bytes)"
+        )
+    grid.add_row("entries", _block("\n".join(lines), max_length=6000))
+    return Panel(
+        grid,
+        title="CLEANUP PLAN (nothing moved)",
+        title_align="left",
+        border_style="yellow",
+    )
+
+
 def render_thinking(plan: dict[str, Any], *, verbose: bool = False) -> Panel:
     if not verbose:
         summary = Text.assemble(
@@ -1004,6 +1041,7 @@ __all__ = [
     "denial_explanation",
     "render_actions",
     "render_answer",
+    "render_cleanup_plan",
     "render_audit",
     "render_confirmation",
     "render_cpu",

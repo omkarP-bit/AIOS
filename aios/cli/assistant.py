@@ -20,6 +20,7 @@ from aios.cli.errors import CliError, ServiceUnavailable, model_unavailable
 from aios.cli.state import AppState
 from aios.cli.ui.render import (
     render_answer,
+    render_cleanup_plan,
     render_confirmation,
     render_error,
     render_plan,
@@ -328,6 +329,56 @@ class Assistant:
         if getattr(self, "_render_blocks", True):
             self.state.console.print(renderable)
 
+    def _cleanup_plan_turn(
+        self,
+        question: str,
+        plan: PlanResult,
+        result: TurnResult,
+        *,
+        show_actions: bool,
+    ) -> TurnResult:
+        """Return a cleanup plan for separate approval; never trash from chat.
+
+        Only deterministic criteria are forwarded. A missing directory fails
+        closed with a request to name one -- chat never falls back to `/`.
+        """
+        request = plan.request
+        if request is None:
+            result.answer = "No action was proposed."
+            return result
+        criteria = _cleanup_criteria(request.params)
+        if criteria is None:
+            result.answer = (
+                "Name a directory to scan, for example 'files in ~/Downloads "
+                "not modified in 30 days'. I will show a plan; nothing is moved "
+                "until you approve it separately with `aios clean`."
+            )
+            return result
+        try:
+            planned = self.state.client.propose_cleanup(
+                criteria["root"],
+                min_age_days=criteria.get("min_age_days", 0),
+                min_size_bytes=criteria.get("min_size_bytes", 0),
+                extensions=criteria.get("extensions", []),
+                max_results=criteria.get("max_results", 500),
+            )
+        except CliError as exc:
+            result.denied = True
+            result.answer = exc.message
+            return result
+        result.approval_plan = planned
+        plan_data = planned.get("plan") or {}
+        if show_actions:
+            self._print(render_cleanup_plan(plan_data))
+        result.blocks.append("plan")
+        result.answer = (
+            f"I prepared cleanup plan {planned.get('plan_id')} "
+            f"(hash {planned.get('plan_hash')}) for {plan_data.get('file_count', 0)} files. "
+            "Nothing was moved. Review it, then approve separately with "
+            f"`aios clean {criteria['root']} --approve`."
+        )
+        return result
+
     def _plan_action_turn(
         self,
         question: str,
@@ -347,6 +398,14 @@ class Assistant:
         if request is None:
             result.answer = "No action was proposed."
             return result
+
+        # A trash proposal is never applied from chat. The core derives the
+        # target list from a deterministic scan and returns a cleanup plan for
+        # a separate, explicit operator approval. The model cannot supply paths
+        # or approve the plan itself.
+        if request.action_name in {"filesystem.trash", "filesystem.quarantine"}:
+            return self._cleanup_plan_turn(question, plan, result, show_actions=show_actions)
+
         params = _plan_intent_params(request.action_name, request.params)
         try:
             planned = self.state.client.build_plan(
@@ -478,6 +537,26 @@ def _plan_intent_params(action: str, params: dict[str, Any]) -> dict[str, Any]:
         "network.prefer": ("connection",),
     }.get(action, ())
     return {key: params[key] for key in keys if key in params}
+
+
+def _cleanup_criteria(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Forward only deterministic selection criteria from a proposal.
+
+    File names, contents, and arbitrary metadata are never criteria. A missing
+    directory returns None: chat never substitutes `/` or a home directory.
+    """
+    root = params.get("root") or params.get("path") or params.get("directory")
+    if not isinstance(root, str) or not root.strip():
+        return None
+    criteria: dict[str, Any] = {"root": root.strip()}
+    for key in ("min_age_days", "min_size_bytes", "max_results"):
+        value = params.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            criteria[key] = int(value)
+    extensions = params.get("extensions")
+    if isinstance(extensions, list):
+        criteria["extensions"] = [e for e in extensions if isinstance(e, str)]
+    return criteria
 
 
 def _plan_failure(action: str, params: dict[str, Any], message: str) -> str:

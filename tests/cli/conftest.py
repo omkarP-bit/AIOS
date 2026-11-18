@@ -13,6 +13,30 @@ import pytest
 
 from aios.ai.catalog import Catalog
 
+ALLOW_VERDICT = {
+    "action_id": "act-cleanup",
+    "decision": "ALLOW",
+    "state": "COMPLETED",
+    "executed": True,
+    "result": {"action_id": "act-cleanup", "data": {"file_count": 2}},
+}
+
+DENY_VERDICT = {
+    "action_id": "act-cleanup",
+    "decision": "DENY",
+    "state": "DENIED",
+    "executed": False,
+    "denial_reason": "policy_deny",
+}
+
+UNAVAILABLE_VERDICT = {
+    "action_id": "act-cleanup",
+    "decision": "DENY",
+    "state": "DENIED",
+    "executed": False,
+    "denial_reason": "audit_unavailable",
+}
+
 SCHEMA = {
     "protocol_version": "0.7.0",
     "allowed_actions": ["filesystem.read", "process.list", "system.memory", "system.status"],
@@ -170,6 +194,9 @@ class FakeClient:
         self.confirm_verdict = kwargs.get("confirm_verdict")
         self.plan_payload = kwargs.get("plan_payload")
         self.apply_verdict = kwargs.get("apply_verdict")
+        self.cleanup_payload = kwargs.get("cleanup_payload")
+        self.cleanup_verdict = kwargs.get("cleanup_verdict")
+        self.restore_result = kwargs.get("restore_result")
         self.diagnose_data = kwargs.get("diagnose", DIAGNOSE)
         self.network_status_data = kwargs.get("network_status", NETWORK_STATUS)
         self.disk_data = kwargs.get("disk", DISK)
@@ -271,6 +298,59 @@ class FakeClient:
             "data": {"status": "ok"},
         }
         return 200, dict(verdict)
+
+    def filesystem_find(self, root, **kwargs):
+        self.calls.append(("filesystem_find", (root, dict(kwargs))))
+        return {"verdict": dict(self.cleanup_verdict or ALLOW_VERDICT), "scan": {"total": 0}}
+
+    def propose_cleanup(self, root, **kwargs):
+        self.calls.append(("propose_cleanup", (root, dict(kwargs))))
+        if self.cleanup_payload is not None:
+            return {**self.cleanup_payload}
+        return {
+            "plan_id": "plan-cleanup",
+            "plan_hash": "sha256:cleanup",
+            "status": "PENDING_APPROVAL",
+            "requires_approval": True,
+            "verdict": dict(self.cleanup_verdict or ALLOW_VERDICT),
+            "plan": {
+                "plan_id": "plan-cleanup",
+                "plan_hash": "sha256:cleanup",
+                "status": "PENDING_APPROVAL",
+                "criteria": {"root": root, "min_age_days": kwargs.get("min_age_days", 0)},
+                "file_count": 2,
+                "total_bytes": 2048,
+                "entries": [
+                    {"realpath": root + "/a.log", "size": 1024},
+                    {"realpath": root + "/b.log", "size": 1024},
+                ],
+            },
+        }
+
+    def get_plan(self, plan_id):
+        self.calls.append(("get_plan", plan_id))
+        return {"plan": self.propose_cleanup("/tmp")["plan"]}
+
+    def list_plans(self):
+        self.calls.append(("list_plans", ()))
+        return [self.propose_cleanup("/tmp")["plan"]]
+
+    def approve_cleanup(self, plan_id, plan_hash, operator="operator-cli"):
+        self.calls.append(("approve_cleanup", (plan_id, plan_hash, operator)))
+        return {"plan_id": plan_id, "plan_hash": plan_hash, "status": "APPROVED"}
+
+    def trash_cleanup(self, plan_id):
+        self.calls.append(("trash_cleanup", plan_id))
+        return {
+            "verdict": dict(self.cleanup_verdict or ALLOW_VERDICT),
+            "plan": {"plan_id": plan_id, "status": "EXECUTED"},
+        }
+
+    def restore_action(self, action_id):
+        self.calls.append(("restore_action", action_id))
+        if self.restore_result is not None:
+            return dict(self.restore_result)
+        return {"action_id": action_id, "verdicts": [dict(ALLOW_VERDICT)]}
 
 
 class FakeProvider:
