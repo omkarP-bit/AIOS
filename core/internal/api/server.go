@@ -67,6 +67,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/network/connections", s.networkConnections)
 	mux.HandleFunc("/network/status", s.networkStatus)
 	mux.HandleFunc("/filesystem/usage", s.filesystemUsage)
+	// Deterministic cleanup surface. Discovery and proposal are read-only;
+	// approval, trash, and restore are separate operator steps. Origin and
+	// capability state are set server-side, never from these request bodies.
+	mux.HandleFunc("POST /filesystem/find", s.filesystemFind)
+	mux.HandleFunc("POST /plans", s.proposeCleanup)
+	mux.HandleFunc("GET /plans", s.listCleanupPlans)
+	mux.HandleFunc("GET /plans/{id}", s.getCleanupPlan)
+	mux.HandleFunc("POST /plans/{id}/approve", s.approveCleanup)
+	mux.HandleFunc("POST /plans/{id}/trash", s.trashCleanup)
+	mux.HandleFunc("POST /restore/{action_id}", s.restoreAction)
+	mux.HandleFunc("POST /capabilities/grant", s.grantCapability)
+	mux.HandleFunc("POST /capabilities/revoke", s.revokeCapability)
 	return mux
 }
 

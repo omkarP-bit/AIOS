@@ -14,7 +14,14 @@ import (
 	"time"
 
 	"aios/internal/canonical"
+	"aios/internal/catalog"
 	"aios/internal/model"
+)
+
+// Cleanup limits are a hard ceiling. A plan that exceeds them is never built.
+const (
+	MaxCleanupFiles = 500
+	MaxCleanupBytes = int64(10_737_418_240)
 )
 
 // CleanupStatus is the engine-owned lifecycle of a cleanup plan. Status is not
@@ -74,6 +81,7 @@ type Entry struct {
 	Inode    uint64 `json:"inode"`
 	Device   uint64 `json:"device"`
 	Owner    uint32 `json:"owner"`
+	Mode     uint32 `json:"mode"` // captured permissions, rechecked before a move
 }
 
 // CleanupPlan is the exact object an operator approves. No AI-visible shape
@@ -123,7 +131,7 @@ func (p CleanupPlan) body() map[string]any {
 	for _, e := range p.Entries {
 		entries = append(entries, map[string]any{
 			"realpath": e.Realpath, "size": e.Size, "mtime": e.Mtime,
-			"inode": e.Inode, "device": e.Device, "owner": e.Owner,
+			"inode": e.Inode, "device": e.Device, "owner": e.Owner, "mode": e.Mode,
 		})
 	}
 	criteria := map[string]any{
@@ -153,24 +161,39 @@ func ComputeCleanupHash(p CleanupPlan) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// ValidateCriteria checks the only selection dimensions the operator may set.
+// There is deliberately no filename, content, or metadata predicate here.
+func ValidateCriteria(criteria Criteria) error {
+	if criteria.Root == "" || !filepath.IsAbs(criteria.Root) {
+		return errors.New("root must be an absolute path")
+	}
+	if strings.ContainsRune(criteria.Root, 0) {
+		return errors.New("root contains a null byte")
+	}
+	if criteria.MinAgeDays < 0 || criteria.MinAgeDays > 3650 {
+		return errors.New("min_age_days must be between 0 and 3650")
+	}
+	if criteria.MinSizeBytes < 0 {
+		return errors.New("min_size_bytes must be non-negative")
+	}
+	if criteria.MaxResults < 1 || criteria.MaxResults > 5000 {
+		return errors.New("max_results must be between 1 and 5000")
+	}
+	if len(criteria.Extensions) > 32 {
+		return errors.New("too many extensions")
+	}
+	return nil
+}
+
 // NewCleanupPlan is the single constructor for a cleanup plan. It is called by
 // the security engine after a deterministic scan and never with a list of
 // paths supplied by the model. Invalid criteria fail closed.
 func NewCleanupPlan(agentID, sessionID string, criteria Criteria, entries []Entry, ttl time.Duration, now time.Time) (CleanupPlan, error) {
-	if criteria.Root == "" || !filepath.IsAbs(criteria.Root) {
-		return CleanupPlan{}, errors.New("root must be an absolute path")
+	if err := ValidateCriteria(criteria); err != nil {
+		return CleanupPlan{}, err
 	}
-	if strings.ContainsRune(criteria.Root, 0) {
-		return CleanupPlan{}, errors.New("root contains a null byte")
-	}
-	if criteria.MinAgeDays < 0 {
-		return CleanupPlan{}, errors.New("min_age_days must be non-negative")
-	}
-	if criteria.MinSizeBytes < 0 {
-		return CleanupPlan{}, errors.New("min_size_bytes must be non-negative")
-	}
-	if criteria.MaxResults < 1 {
-		return CleanupPlan{}, errors.New("max_results must be positive")
+	if agentID == "" || sessionID == "" {
+		return CleanupPlan{}, errors.New("plan needs an agent and session id")
 	}
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
@@ -189,6 +212,9 @@ func NewCleanupPlan(agentID, sessionID string, criteria Criteria, entries []Entr
 		}
 		total += e.Size
 	}
+	if len(copyEntries) > MaxCleanupFiles || total > MaxCleanupBytes {
+		return CleanupPlan{}, errors.New("cleanup plan exceeds the hard file or byte limit")
+	}
 	created := now.UTC().Truncate(time.Microsecond)
 	p := CleanupPlan{
 		PlanID: NewID(), AgentID: agentID, SessionID: sessionID,
@@ -204,4 +230,47 @@ func NewCleanupPlan(agentID, sessionID string, criteria Criteria, entries []Entr
 	}
 	p.PlanHash = hash
 	return p, nil
+}
+
+// ToGeneric derives the executable plan from the approved cleanup plan. It is a
+// pure function of the stored plan: the approval token is minted for this exact
+// derived plan, so any change to the entries changes the approved hash and
+// cannot be executed with the old token. The plan id is shared so the operator
+// sees one identity from proposal through execution.
+func (p CleanupPlan) ToGeneric() Plan {
+	steps := make([]Step, 0, len(p.Entries))
+	rollback := make([]RollbackStep, 0, len(p.Entries))
+	for index, entry := range p.Entries {
+		stepID := fmt.Sprintf("step-%d", index+1)
+		candidateID := cleanupCandidateID(entry)
+		steps = append(steps, Step{
+			StepID: stepID, Action: "filesystem.trash", CandidateID: candidateID,
+			Path: entry.Realpath, Dev: entry.Device, Ino: entry.Inode,
+			SizeBytes: entry.Size, MtimeNS: entry.Mtime, Mode: entry.Mode,
+			UID: entry.Owner,
+		})
+		rollback = append(rollback, RollbackStep{
+			StepID: stepID, Action: "filesystem.restore",
+			CandidateID: candidateID, Path: entry.Realpath,
+		})
+	}
+	limits := Limits{MaxItems: MaxCleanupFiles, MaxBytes: MaxCleanupBytes}
+	if descriptor, ok := catalog.Lookup("filesystem.trash"); ok && descriptor.Limits.MaxItems > 0 {
+		limits = Limits{MaxItems: descriptor.Limits.MaxItems, MaxBytes: descriptor.Limits.MaxBytes}
+	}
+	generic := Plan{
+		PlanID: p.PlanID, Kind: "cleanup", CatalogVersion: catalog.CatalogVersion,
+		AgentID: p.AgentID, SessionID: p.SessionID, CreatedAt: p.CreatedAt,
+		Roots: []string{p.Root}, Limits: limits, Steps: steps, Rollback: rollback,
+	}
+	generic.PlanHash = ComputeHash(generic)
+	return generic
+}
+
+// cleanupCandidateID is stable for one file identity and is never supplied by
+// a caller. It matches the shape used by the scanner's candidate ids.
+func cleanupCandidateID(entry Entry) string {
+	material := fmt.Sprintf("%s\x00%d\x00%d\x00%d", entry.Realpath, entry.Device, entry.Inode, entry.Mtime)
+	sum := sha256.Sum256([]byte(material))
+	return "c-" + hex.EncodeToString(sum[:])[:16]
 }

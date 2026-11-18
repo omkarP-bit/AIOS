@@ -22,15 +22,18 @@ const PlanTTL = 10 * time.Minute
 
 // Runtime is one wired AIOS core.
 type Runtime struct {
-	Settings     config.Settings
-	Gateway      *gateway.Gateway
-	Executor     actions.Executor
-	Capabilities *capability.Manager
-	Policy       policy.Engine
-	Ledger       *ledger.Ledger
-	Engine       *engine.Engine
-	Plans        *plan.Registry
-	Network      *netctl.Manager
+	Settings          config.Settings
+	Gateway           *gateway.Gateway
+	Executor          actions.Executor
+	Capabilities      *capability.Manager
+	Policy            policy.Engine
+	Ledger            *ledger.Ledger
+	Engine            *engine.Engine
+	Plans             *plan.Registry
+	Cleanups          *plan.CleanupRegistry
+	Cleanup           *engine.CleanupService
+	ApprovalAuthority *plan.Authority
+	Network           *netctl.Manager
 }
 
 // New builds the read-only gateway, the mutation dispatcher, policy, the plan
@@ -72,6 +75,13 @@ func New(settings config.Settings) (*Runtime, error) {
 		Plans: plan.NewRegistry(PlanTTL), Network: networkManager,
 	}
 	rt.Engine = engine.New(gw, executor, rt.Capabilities, p, audit)
+	authority, err := rt.Authority()
+	if err != nil {
+		return nil, err
+	}
+	rt.ApprovalAuthority = authority
+	rt.Cleanups = plan.NewCleanupRegistry(PlanTTL)
+	rt.Cleanup = engine.NewCleanupService(rt.Engine, rt.Cleanups, authority)
 	return rt, nil
 }
 
