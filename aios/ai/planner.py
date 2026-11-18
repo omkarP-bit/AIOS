@@ -40,6 +40,16 @@ Rules:
 - For disk or filesystem space questions, filesystem.usage reports total, used,
   free, and used_percent bytes for each mounted filesystem. The observation's
   disks list already contains the same data when it is available.
+- Cleanup is operator-driven. Never propose filesystem.cleanup_scan,
+  filesystem.quarantine, or filesystem.restore, and never guess a target or
+  default to /. If the operator asks to clean up files without naming a
+  directory, propose no action and ask which directory; tell them the operator
+  flow is `aios-core cleanup scan PATH --min-age-days N --plan-out plan.json`.
+- AIOS does not delete files. filesystem.delete, filesystem.rm, and
+  filesystem.purge are permanently forbidden. Cleanup moves candidates into
+  quarantine and can be restored.
+- "Not used" is judged by modification time (mtime). Access time is usually
+  disabled, so say "not modified" unless the observation proves otherwise.
 - process.signal and network.prefer are mutations. They are allowed only as
   proposals: the CLI builds an exact plan, shows its hash, and asks the
   operator. You cannot approve or run them.

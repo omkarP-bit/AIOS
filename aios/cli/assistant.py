@@ -89,6 +89,27 @@ def denial_answer(verdict: dict[str, Any], plan: PlanResult) -> str:
     return f"{denied} {guidance}"
 
 
+def proposal_failure(exc: CliError, action: str) -> CliError:
+    """Make an invalid-proposal reply name the missing input.
+
+    The core is right to reject a pathless filesystem request: a scan must be
+    bound to an exact root. The generic "check the request values" hint does
+    not tell the operator what to do next, so say it plainly.
+    """
+    if action.startswith("filesystem.") and "path must not be empty" in exc.message:
+        return CliError(
+            "That request needs an explicit directory, and none was given, "
+            "so nothing was scanned or removed.",
+            next_step=(
+                "Name a directory, for example: aios ask 'find files in "
+                "~/Downloads not modified in 29 days'. The operator cleanup "
+                "flow is: aios-core cleanup scan PATH --min-age-days 29 "
+                "--plan-out plan.json"
+            ),
+        )
+    return exc
+
+
 @dataclass
 class TurnResult:
     question: str
@@ -221,6 +242,9 @@ class Assistant:
             _status, verdict = state.client.propose(plan.request)
         except ServiceUnavailable as exc:
             result.error = exc
+            return result
+        except CliError as exc:
+            result.error = proposal_failure(exc, plan.request.action_name)
             return result
         result.verdict = verdict
         target = verdict.get("target") or _request_target(plan.request)

@@ -317,6 +317,16 @@ def test_planner_surfaces_decline_reason() -> None:
     assert plan.reason == "no action needed"
 
 
+def test_planner_keeps_cleanup_operator_driven() -> None:
+    from aios.ai.planner import SYSTEM_PROMPT
+
+    assert "Never propose filesystem.cleanup_scan" in SYSTEM_PROMPT
+    assert "ask which directory" in SYSTEM_PROMPT
+    assert "aios-core cleanup scan PATH" in SYSTEM_PROMPT
+    assert "does not delete files" in SYSTEM_PROMPT
+    assert "modification time (mtime)" in SYSTEM_PROMPT
+
+
 def test_parse_plan_returns_answer_and_reason() -> None:
     from aios.ai.planner import parse_plan
 

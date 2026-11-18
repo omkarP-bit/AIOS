@@ -197,6 +197,72 @@ def test_denied_ask_exits_3(runner, fake_client, provider) -> None:
     assert "nothing was run" in result.output
 
 
+def test_proposal_failure_rewrites_only_pathless_filesystem_errors() -> None:
+    from aios.cli.assistant import proposal_failure
+    from aios.cli.errors import CliError
+
+    original = CliError(
+        "The AIOS core rejected /actions/propose: path must not be empty",
+        next_step="Check the request values, then retry.",
+    )
+    rewritten = proposal_failure(original, "filesystem.cleanup_scan")
+    assert rewritten is not original
+    assert "explicit directory" in rewritten.message
+    assert "aios-core cleanup scan PATH --min-age-days 29" in rewritten.next_step
+    assert "Check the request values" not in rewritten.next_step
+
+    assert proposal_failure(original, "system.status") is original
+    other = CliError("some other validation failure")
+    assert proposal_failure(other, "filesystem.read") is other
+
+
+def test_pathless_cleanup_proposal_asks_for_a_directory(runner, provider) -> None:
+    from aios.cli.errors import CliError
+
+    cleanup_schema = {
+        **SCHEMA,
+        "allowed_actions": [*SCHEMA["allowed_actions"], "filesystem.cleanup_scan"],
+        "params_schema": {
+            **SCHEMA["params_schema"],
+            "filesystem.cleanup_scan": {
+                "properties": {
+                    "path": {"type": "string"},
+                    "min_age_days": {"type": "integer"},
+                }
+            },
+        },
+    }
+    fake = FakeClient(schema=cleanup_schema)
+
+    def reject(_request):
+        raise CliError(
+            "The AIOS core rejected /actions/propose: path must not be empty",
+            next_step="Check the request values, then retry.",
+        )
+
+    fake.propose = reject
+    provider.responses = [
+        json.dumps(
+            {
+                "action": "filesystem.cleanup_scan",
+                "params": {"min_age_days": 29},
+                "intent": "clean files not used recently",
+            }
+        )
+    ]
+    use(fake)
+
+    result = runner.invoke(app, ["ask", "remove files not used more than 29 days"])
+    plain = re.sub(r"[│╭╰─]+", " ", result.output)
+    plain = re.sub(r"\s+", " ", plain)
+    assert result.exit_code == 1
+    assert "The AIOS core rejected" not in plain
+    assert "Check the request values" not in plain
+    assert "explicit directory" in plain
+    assert "Name a directory" in plain
+    assert "aios-core cleanup scan PATH --min-age-days 29" in plain
+
+
 def test_chat_mode_shows_only_the_answer(fake_client, provider, capsys) -> None:
     import aios.cli.assistant as assistant_module
     from aios.cli.state import get_state
