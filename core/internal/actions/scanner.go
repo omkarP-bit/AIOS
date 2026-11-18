@@ -31,6 +31,7 @@ var skipSuffixes = []string{".sock", ".socket", ".pid", ".lock"}
 type ScanOptions struct {
 	MinAgeDays    int
 	MinSizeBytes  int64
+	Extensions    []string // canonical ".log" values; empty means all
 	MaxCandidates int
 	IncludeHidden bool
 	ExcludeRoots  []string
@@ -123,6 +124,10 @@ func ScanCandidates(root string, opts ScanOptions) (model.ScanResult, error) {
 			return true
 		}
 		if info.ModTime().UnixNano() > cutoff || info.Size() < opts.MinSizeBytes {
+			result.Skipped++
+			return true
+		}
+		if len(opts.Extensions) > 0 && !extensionAllowed(name, opts.Extensions) {
 			result.Skipped++
 			return true
 		}
@@ -263,6 +268,16 @@ func numeric(value string) bool {
 		}
 	}
 	return true
+}
+
+func extensionAllowed(name string, extensions []string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	for _, allowed := range extensions {
+		if ext == strings.ToLower(allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func classify(path string) (string, []string) {

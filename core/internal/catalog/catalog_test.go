@@ -80,6 +80,50 @@ func TestPolicyDataMatchesCatalog(t *testing.T) {
 	}
 }
 
+// ASI05-001: permanent delete is never a legal action, and unknown actions
+// stay CRITICAL rather than inheriting a low-risk default.
+func TestForbiddenAndUnknownActions(t *testing.T) {
+	for _, name := range []string{"filesystem.delete", "filesystem.rm", "filesystem.purge", "shell.exec"} {
+		if !Forbidden[name] {
+			t.Errorf("%s must stay forbidden", name)
+		}
+		if _, ok := Catalog[name]; ok {
+			t.Errorf("%s must not be in the catalogue", name)
+		}
+		if EffectFor(name) != EffectForbidden {
+			t.Errorf("%s must resolve to FORBIDDEN", name)
+		}
+		if RiskFor(name) != RiskCritical {
+			t.Errorf("%s must resolve to CRITICAL", name)
+		}
+	}
+	if RiskFor("filesystem.unknown") != RiskCritical {
+		t.Fatal("unknown action must be CRITICAL")
+	}
+}
+
+// ASI02-001: legacy names resolve to their current operation for grants.
+func TestActionAliases(t *testing.T) {
+	if Canonical("filesystem.cleanup_scan") != "filesystem.find" {
+		t.Fatal("cleanup_scan alias is wrong")
+	}
+	if Canonical("filesystem.quarantine") != "filesystem.trash" {
+		t.Fatal("quarantine alias is wrong")
+	}
+	if !SameAction("filesystem.quarantine", "filesystem.trash") {
+		t.Fatal("aliases must compare equal")
+	}
+	if Canonical("filesystem.restore") != "filesystem.restore" {
+		t.Fatal("unknown actions must not be rewritten")
+	}
+	if DescriptorFor("filesystem.find").Risk != RiskLow {
+		t.Fatal("filesystem.find must be LOW")
+	}
+	if DescriptorFor("filesystem.trash").Risk != RiskMedium {
+		t.Fatal("filesystem.trash must be MEDIUM")
+	}
+}
+
 func sameSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -119,8 +163,9 @@ func TestCatalogSafety(t *testing.T) {
 		}
 	}
 	wantPlan := map[string]bool{
-		"filesystem.quarantine": true, "filesystem.restore": true,
-		"process.signal": true, "network.prefer": true,
+		"filesystem.trash": true, "filesystem.quarantine": true,
+		"filesystem.restore": true, "process.signal": true,
+		"network.prefer": true,
 	}
 	if len(PlanActions) != len(wantPlan) {
 		t.Errorf("unexpected plan action set: %v", PlanActions)

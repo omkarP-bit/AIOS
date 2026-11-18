@@ -3,6 +3,12 @@
     "version": "0.7.0",
     "catalog_version": "2026-11-13",
     "allowed_agents": ["local-agent"],
+    "cleanup": {
+      "max_files": 500,
+      "max_total_bytes": 10737418240,
+      "per_session_rate_limit": 10,
+      "default_dry_run": true
+    },
     "allowed_actions": {
       "system.cpu": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V4"]},
       "system.memory": {"risk": "LOW", "read_only": true, "path_action": false, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021"]},
@@ -20,9 +26,11 @@
       "filesystem.list": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
       "filesystem.stat": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-A01:2021", "OWASP-ASVS4-V12"]},
       "filesystem.read": {"risk": "MEDIUM", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "confirm", "owasp": ["OWASP-LLM01:2025", "OWASP-LLM02:2025", "OWASP-ASVS4-V12"]},
+      "filesystem.find": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V12", "OWASP-ASI02:2025"]},
       "filesystem.cleanup_scan": {"risk": "LOW", "read_only": true, "path_action": true, "effect": "OBSERVE", "approval": "none", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V12"]},
-      "filesystem.quarantine": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "STAGE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12"]},
-      "filesystem.restore": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "REVERSIBLE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12"]}
+      "filesystem.trash": {"risk": "MEDIUM", "read_only": false, "path_action": true, "effect": "REVERSIBLE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASI02:2025", "OWASP-ASI03:2025"]},
+      "filesystem.quarantine": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "STAGE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12", "OWASP-ASI02:2025"]},
+      "filesystem.restore": {"risk": "HIGH", "read_only": false, "path_action": true, "effect": "REVERSIBLE", "approval": "plan", "owasp": ["OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021", "OWASP-ASVS4-V4", "OWASP-ASVS4-V12", "OWASP-ASI02:2025"]}
     },
     "forbidden_actions": [
       "process.terminate",

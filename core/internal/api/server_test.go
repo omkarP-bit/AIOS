@@ -115,8 +115,8 @@ func TestSchemaListsAllowedAndForbiddenActions(t *testing.T) {
 	body := decode(t, call(t, testServer(t), http.MethodGet, "/actions/schema", ""))
 	allowed, _ := body["allowed_actions"].([]any)
 	forbidden, _ := body["forbidden_actions"].([]any)
-	if len(allowed) != 19 {
-		t.Fatalf("expected 19 allowed actions, got %d", len(allowed))
+	if len(allowed) != 21 {
+		t.Fatalf("expected 21 allowed actions, got %d", len(allowed))
 	}
 	found := false
 	for _, name := range forbidden {
@@ -130,6 +130,11 @@ func TestSchemaListsAllowedAndForbiddenActions(t *testing.T) {
 	schemas, _ := body["params_schema"].(map[string]any)
 	if _, ok := schemas["filesystem.quarantine"]; !ok {
 		t.Fatal("param schema missing for filesystem.quarantine")
+	}
+	for _, name := range []string{"filesystem.find", "filesystem.trash"} {
+		if _, ok := schemas[name]; !ok {
+			t.Fatalf("param schema missing for %s", name)
+		}
 	}
 }
 

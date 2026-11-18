@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -168,6 +169,27 @@ type FilesystemCleanupScanParams struct {
 
 func (*FilesystemCleanupScanParams) actionParams() {}
 
+// FilesystemFindParams carries deterministic operator criteria. The model may
+// propose these values, but every field is validated against a closed shape;
+// filenames and file contents are never criteria.
+type FilesystemFindParams struct {
+	Root         string   `json:"root"`
+	MinAgeDays   int      `json:"min_age_days"`
+	MinSizeBytes int64    `json:"min_size_bytes"`
+	Extensions   []string `json:"extensions"`
+	MaxResults   int      `json:"max_results"`
+}
+
+func (*FilesystemFindParams) actionParams() {}
+
+// FilesystemTrashParams is deliberately plan-only. There is no path field, no
+// candidate list, and no step list a model could fill in.
+type FilesystemTrashParams struct {
+	PlanID string `json:"plan_id"`
+}
+
+func (*FilesystemTrashParams) actionParams() {}
+
 // PlanTargetParams is the common shape of a mutation step.
 type PlanTargetParams struct {
 	Path        string `json:"path"`
@@ -230,8 +252,12 @@ func ParamsFor(action string) Params {
 		return &FilesystemStatParams{}
 	case "filesystem.read":
 		return &FilesystemReadParams{MaxBytes: 65_536}
+	case "filesystem.find":
+		return &FilesystemFindParams{MinAgeDays: 30, MaxResults: 500}
 	case "filesystem.cleanup_scan":
 		return &FilesystemCleanupScanParams{MinAgeDays: 30, MaxCandidates: 500}
+	case "filesystem.trash":
+		return &FilesystemTrashParams{}
 	case "filesystem.quarantine":
 		return &FilesystemQuarantineParams{}
 	case "filesystem.restore":
@@ -390,6 +416,36 @@ func validateParams(action string, raw map[string]json.RawMessage) (Params, map[
 		if p.MaxBytes < 1 || p.MaxBytes > 1_048_576 {
 			return nil, nil, fmt.Errorf("max_bytes must be between 1 and 1048576")
 		}
+	case *FilesystemFindParams:
+		if err := decodeStrict(raw, p, "root", "min_age_days", "min_size_bytes", "extensions", "max_results"); err != nil {
+			return nil, nil, err
+		}
+		if err := ValidAbsolutePath(p.Root); err != nil {
+			return nil, nil, fmt.Errorf("invalid root: %w", err)
+		}
+		if p.MinAgeDays < 0 || p.MinAgeDays > 3650 {
+			return nil, nil, fmt.Errorf("min_age_days must be between 0 and 3650")
+		}
+		if p.MinSizeBytes < 0 {
+			return nil, nil, fmt.Errorf("min_size_bytes must be non-negative")
+		}
+		if p.MaxResults < 1 || p.MaxResults > 5000 {
+			return nil, nil, fmt.Errorf("max_results must be between 1 and 5000")
+		}
+		extensions, err := normaliseExtensions(p.Extensions)
+		if err != nil {
+			return nil, nil, err
+		}
+		p.Extensions = extensions
+	case *FilesystemTrashParams:
+		// Plan id only. Any extra field (path, paths, steps, candidate ids) is
+		// rejected by decodeStrict before the engine sees the request.
+		if err := decodeStrict(raw, p, "plan_id"); err != nil {
+			return nil, nil, err
+		}
+		if !ValidPlanID(p.PlanID) {
+			return nil, nil, fmt.Errorf("invalid plan_id")
+		}
 	case *FilesystemCleanupScanParams:
 		if err := decodeStrict(raw, p, "path", "min_age_days", "min_size_bytes", "max_candidates", "include_hidden"); err != nil {
 			return nil, nil, err
@@ -430,6 +486,41 @@ func validateParams(action string, raw map[string]json.RawMessage) (Params, map[
 		}
 	}
 	return typed, decoded, nil
+}
+
+// normaliseExtensions accepts ".log", "log", or "*.log" and returns a sorted,
+// deduplicated list of canonical ".log" values. Anything path-shaped is
+// rejected: an extension is data, never a target.
+func normaliseExtensions(values []string) ([]string, error) {
+	if len(values) > 32 {
+		return nil, fmt.Errorf("too many extensions")
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		value = strings.TrimPrefix(value, "*")
+		if value == "" {
+			return nil, fmt.Errorf("extension must not be empty")
+		}
+		if strings.ContainsAny(value, "/\\\x00") || strings.Contains(value, "..") {
+			return nil, fmt.Errorf("invalid extension %q", raw)
+		}
+		for _, r := range value {
+			if r < 0x20 || r == 0x7f {
+				return nil, fmt.Errorf("invalid extension %q", raw)
+			}
+		}
+		if !strings.HasPrefix(value, ".") {
+			value = "." + value
+		}
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func decodePlanTarget(raw map[string]json.RawMessage, out *PlanTargetParams) error {

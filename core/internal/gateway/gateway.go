@@ -294,28 +294,33 @@ func (g *Gateway) Execute(req *protocol.Request) (*Envelope, error) {
 		// File bytes are hostile by construction, whoever asked for them.
 		return envelope("file:"+p.Path, "external", "T4", name, data), nil
 
-	case "filesystem.cleanup_scan":
-		p, ok := req.Typed.(*protocol.FilesystemCleanupScanParams)
-		if !ok {
+	case "filesystem.find", "filesystem.cleanup_scan":
+		opts := actions.ScanOptions{}
+		var root string
+		switch p := req.Typed.(type) {
+		case *protocol.FilesystemFindParams:
+			root = p.Root
+			opts.MinAgeDays, opts.MinSizeBytes = p.MinAgeDays, p.MinSizeBytes
+			opts.Extensions, opts.MaxCandidates = p.Extensions, p.MaxResults
+		case *protocol.FilesystemCleanupScanParams:
+			root = p.Path
+			opts.MinAgeDays, opts.MinSizeBytes = p.MinAgeDays, p.MinSizeBytes
+			opts.MaxCandidates, opts.IncludeHidden = p.MaxCandidates, p.IncludeHidden
+		default:
 			return nil, fail("invalid scan params")
 		}
-		if sensitive(p.Path) {
-			return nil, fail("path is outside the readable set: %s", p.Path)
+		if sensitive(root) {
+			return nil, fail("path is outside the readable set: %s", root)
 		}
-		maxCandidates := p.MaxCandidates
-		if maxCandidates > g.MaxDirEntries {
-			maxCandidates = g.MaxDirEntries
-		}
-		opts := actions.ScanOptions{
-			MinAgeDays: p.MinAgeDays, MinSizeBytes: p.MinSizeBytes,
-			MaxCandidates: maxCandidates, IncludeHidden: p.IncludeHidden,
+		if opts.MaxCandidates < 1 || opts.MaxCandidates > g.MaxDirEntries {
+			opts.MaxCandidates = g.MaxDirEntries
 		}
 		if g.QuarantineDir != "" {
 			opts.ExcludeRoots = []string{g.QuarantineDir}
 		}
-		result, err := actions.ScanCandidates(p.Path, opts)
+		result, err := actions.ScanCandidates(root, opts)
 		if err != nil {
-			return nil, fail("cannot scan %s: %v", p.Path, err)
+			return nil, fail("cannot scan %s: %v", root, err)
 		}
 		return envelope("scan:"+result.Root, "gateway", "T2", name, result), nil
 	}

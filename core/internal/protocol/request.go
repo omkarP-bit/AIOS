@@ -140,6 +140,8 @@ func (r *Request) Target() string {
 			return p.Path
 		case *FilesystemReadParams:
 			return p.Path
+		case *FilesystemFindParams:
+			return p.Root
 		case *FilesystemCleanupScanParams:
 			return p.Path
 		case *FilesystemQuarantineParams:
@@ -442,6 +444,32 @@ func ValidPath(path string) error {
 	}
 	if strings.ContainsRune(path, 0) {
 		return fmt.Errorf("path must not contain NUL")
+	}
+	return nil
+}
+
+// ValidAbsolutePath is the stricter validator for operator-supplied roots and
+// grant patterns. It rejects relative paths, home expansion, traversal, NUL,
+// and control characters before any filesystem call is made.
+func ValidAbsolutePath(path string) error {
+	if err := ValidPath(path); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("path must be absolute")
+	}
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		return fmt.Errorf("home expansion is not allowed")
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == ".." {
+			return fmt.Errorf("path must not contain '..'")
+		}
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path must not contain control characters")
+		}
 	}
 	return nil
 }

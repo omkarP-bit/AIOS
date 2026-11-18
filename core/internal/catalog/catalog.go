@@ -150,11 +150,32 @@ var Catalog = map[string]Descriptor{
 		Scope: "none", Approval: ApprovalNone, ReadOnly: true,
 		OWASP: []string{"OWASP-A01:2021", "OWASP-ASVS4-V12"},
 	},
+	"filesystem.find": {
+		ID: "filesystem.find", Version: 1, Effect: EffectObserve, Risk: RiskLow,
+		Scope: "path", Approval: ApprovalNone, ReadOnly: true, PathAction: true,
+		Limits: Limits{MaxItems: 5000, MaxBytes: 0},
+		OWASP: []string{
+			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V12",
+			"OWASP-ASI02:2025",
+		},
+	},
+	// Deprecated alias. Kept so existing plans and clients keep working; the
+	// core resolves it to filesystem.find for capability checks.
 	"filesystem.cleanup_scan": {
 		ID: "filesystem.cleanup_scan", Version: 1, Effect: EffectObserve, Risk: RiskLow,
 		Scope: "path", Approval: ApprovalNone, ReadOnly: true, PathAction: true,
 		Limits: Limits{MaxItems: 5000, MaxBytes: 0},
 		OWASP:  []string{"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-ASVS4-V12"},
+	},
+	"filesystem.trash": {
+		ID: "filesystem.trash", Version: 1, Effect: EffectReversible, Risk: RiskMedium,
+		Scope: "path", Approval: ApprovalPlan, ReadOnly: false, PathAction: true,
+		Inverse: "filesystem.restore",
+		Limits:  Limits{MaxItems: 500, MaxBytes: 10_737_418_240},
+		OWASP: []string{
+			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021",
+			"OWASP-ASI02:2025", "OWASP-ASI03:2025",
+		},
 	},
 	"filesystem.quarantine": {
 		ID: "filesystem.quarantine", Version: 1, Effect: EffectStage, Risk: RiskHigh,
@@ -163,7 +184,7 @@ var Catalog = map[string]Descriptor{
 		Limits:  Limits{MaxItems: 500, MaxBytes: 10_737_418_240},
 		OWASP: []string{
 			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021",
-			"OWASP-ASVS4-V4", "OWASP-ASVS4-V12",
+			"OWASP-ASVS4-V4", "OWASP-ASVS4-V12", "OWASP-ASI02:2025",
 		},
 	},
 	"filesystem.restore": {
@@ -173,10 +194,29 @@ var Catalog = map[string]Descriptor{
 		Limits:  Limits{MaxItems: 500, MaxBytes: 10_737_418_240},
 		OWASP: []string{
 			"OWASP-LLM06:2025", "OWASP-A01:2021", "OWASP-A08:2021",
-			"OWASP-ASVS4-V4", "OWASP-ASVS4-V12",
+			"OWASP-ASVS4-V4", "OWASP-ASVS4-V12", "OWASP-ASI02:2025",
 		},
 	},
 }
+
+// Aliases maps a legacy action id to its current name. Grants on either name
+// authorize the same operation; the risk and policy still come from the action
+// actually requested.
+var Aliases = map[string]string{
+	"filesystem.cleanup_scan": "filesystem.find",
+	"filesystem.quarantine":   "filesystem.trash",
+}
+
+// Canonical returns the current name for a (possibly deprecated) action id.
+func Canonical(action string) string {
+	if name, ok := Aliases[action]; ok {
+		return name
+	}
+	return action
+}
+
+// SameAction reports whether two ids name the same operation.
+func SameAction(a, b string) bool { return Canonical(a) == Canonical(b) }
 
 // Forbidden is permanently outside every AI path.
 var Forbidden = map[string]bool{
@@ -193,6 +233,7 @@ var Forbidden = map[string]bool{
 
 // ExecutorActions are served by the mutation executor, not the gateway.
 var ExecutorActions = map[string]bool{
+	"filesystem.trash":      true,
 	"filesystem.quarantine": true,
 	"filesystem.restore":    true,
 	"process.signal":        true,
@@ -201,6 +242,7 @@ var ExecutorActions = map[string]bool{
 
 // PlanActions always require a plan and an operator approval.
 var PlanActions = map[string]bool{
+	"filesystem.trash":      true,
 	"filesystem.quarantine": true,
 	"filesystem.restore":    true,
 	"process.signal":        true,
@@ -211,6 +253,18 @@ var PlanActions = map[string]bool{
 func Lookup(action string) (Descriptor, bool) {
 	d, ok := Catalog[action]
 	return d, ok
+}
+
+// DescriptorFor returns the descriptor or a closed unknown descriptor. An
+// unknown action is always FORBIDDEN/CRITICAL, never a low-risk default.
+func DescriptorFor(action string) Descriptor {
+	if d, ok := Catalog[action]; ok {
+		return d
+	}
+	return Descriptor{
+		ID: action, Effect: EffectForbidden, Risk: RiskCritical,
+		Scope: "none", Approval: ApprovalNone, OWASP: []string{"OWASP-ASI05:2025"},
+	}
 }
 
 // EffectFor returns FORBIDDEN for an unknown action, never OBSERVE.
